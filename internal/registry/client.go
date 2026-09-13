@@ -82,7 +82,19 @@ type Client struct {
 	tokens    map[string]string     // base|repo|action -> token
 	challenge map[string]*challenge // nil entry = endpoint needs no bearer token
 	rejected  map[string]bool       // endpoints that failed hard for this session
+	proxyErr  error                 // a bad --proxy value, reported on first use
+	proxy     string                // effective --proxy value, for diagnostics
 }
+
+// CheckProxy validates a --proxy value up front so a typo fails immediately
+// with a clear message instead of at the first connection attempt.
+func CheckProxy(raw string) error {
+	_, err := parseProxy(raw)
+	return err
+}
+
+// Proxy describes the configured proxy ("" when following the environment).
+func (c *Client) Proxy() string { return c.proxy }
 
 // New builds a client for the given endpoints (tried in order).
 func New(endpoints []Endpoint, cfg Config) *Client {
@@ -106,13 +118,19 @@ func New(endpoints []Endpoint, cfg Config) *Client {
 	if cfg.SkipTLSVerify {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
-	return &Client{
-		HTTP:      &http.Client{Transport: tr},
-		Endpoints: endpoints,
-		tokens:    map[string]string{},
-		challenge: map[string]*challenge{},
-		rejected:  map[string]bool{},
+	cli := &Client{proxy: cfg.Proxy}
+	spec, err := parseProxy(cfg.Proxy)
+	if err != nil {
+		cli.proxyErr = err
+	} else if err := applyProxy(tr, dialer, spec); err != nil {
+		cli.proxyErr = err
 	}
+	cli.HTTP = &http.Client{Transport: tr}
+	cli.Endpoints = endpoints
+	cli.tokens = map[string]string{}
+	cli.challenge = map[string]*challenge{}
+	cli.rejected = map[string]bool{}
+	return cli
 }
 
 // DisableEndpoint marks an endpoint as unusable for this run.
@@ -354,6 +372,9 @@ func defaultOk(code int) bool { return code/100 == 2 }
 
 // Do executes a request, walking the endpoint list when Failover is set.
 func (c *Client) Do(ctx context.Context, rq Request) (*Response, error) {
+	if c.proxyErr != nil {
+		return nil, c.proxyErr
+	}
 	ok := rq.Ok
 	if ok == nil {
 		ok = defaultOk
@@ -481,6 +502,9 @@ func (c *Client) send(ctx context.Context, ep Endpoint, rq Request, u, tok strin
 
 // DoWithBody behaves like Do but attaches a streaming body.
 func (c *Client) DoWithBody(ctx context.Context, rq Request, body io.Reader, contentLength int64) (*Response, error) {
+	if c.proxyErr != nil {
+		return nil, c.proxyErr
+	}
 	ok := rq.Ok
 	if ok == nil {
 		ok = defaultOk

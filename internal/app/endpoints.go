@@ -125,6 +125,7 @@ func newClient(o *Options, eps []registry.Endpoint) *registry.Client {
 		HostOverrides: o.Resolves,
 		DohServers:    o.DoH,
 		DisableDoH:    o.NoDoH,
+		Proxy:         o.Proxy,
 		Verbose:       os.Getenv("DPULL_DEBUG") != "",
 		Note:          note,
 	})

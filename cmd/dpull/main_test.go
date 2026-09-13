@@ -3,10 +3,12 @@ package main
 import (
 	"errors"
 	"flag"
+	"fmt"
 	"strings"
 	"testing"
 
 	"dpull/internal/app"
+	"dpull/internal/registry"
 )
 
 func TestParseSize(t *testing.T) {
@@ -147,3 +149,18 @@ func TestAdviceForCommonFailures(t *testing.T) {
 type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
+
+func TestAdviceForProxyFailure(t *testing.T) {
+	o := &app.Options{Images: []string{"nginx:1.27"}}
+	err := fmt.Errorf("%w: 连接 socks5 代理 127.0.0.1:1 失败: dial tcp 127.0.0.1:1: connect: connection refused", registry.ErrProxy)
+	box := advice(err, o)
+	joined := strings.Join(box.lines, "\n")
+	for _, want := range []string{"--proxy direct", "socks5://"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("proxy advice missing %q, got %q", want, joined)
+		}
+	}
+	if strings.Contains(joined, "内置备用源也没能救回来") {
+		t.Error("a dead proxy must not be reported as a source problem")
+	}
+}

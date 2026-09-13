@@ -28,7 +28,11 @@ type Config struct {
 	DohServers    []string
 	DisableDoH    bool
 	HostOverrides []string // "host=ip", like curl --resolve
-	Verbose       bool
+	// Proxy routes every request, and the DoH lookups too, through an
+	// http/https/socks4/socks4a/socks5 proxy. "direct" bypasses HTTP_PROXY and
+	// friends. A proxy is also the only client-side answer to SNI interference.
+	Proxy   string
+	Verbose bool
 	// Note receives user-facing diagnostics such as "poisoned DNS bypassed".
 	Note func(format string, args ...any)
 }
@@ -53,6 +57,7 @@ type ipPrefDial struct {
 	doh        *dohResolver
 	note       func(format string, args ...any)
 	noted      map[string]bool
+	proxy      *proxySpec
 
 	mu     sync.Mutex
 	ttl    map[string][]net.IPAddr
@@ -73,8 +78,9 @@ func newIPPrefDial(cfg Config) *ipPrefDial {
 		ttl:        map[string][]net.IPAddr{},
 		stamps:     map[string]time.Time{},
 	}
+	d.proxy, _ = parseProxy(cfg.Proxy) // validated in CheckProxy before use
 	if !cfg.DisableDoH {
-		d.doh = newDoHResolver(cfg.DohServers)
+		d.doh = newDoHResolver(cfg.DohServers, d.proxy)
 	}
 	return d
 }
@@ -195,14 +201,25 @@ func (d *ipPrefDial) order(ips []net.IPAddr) []net.IPAddr {
 	return ips
 }
 
-// noteOnce reports a diagnostic for a host at most once per run.
-func (d *ipPrefDial) noteOnce(host, format string, args ...any) {
+// noteOnce reports a diagnostic for a host at most once per run. sticky keeps
+// the message visible even when the transport retries the same failure, which
+// would otherwise hide the reason behind "context deadline exceeded".
+func (d *ipPrefDial) noteOnce(key, format string, args ...any) {
+	d.noteLevel(key, false, format, args...)
+}
+
+// noteAlways is noteOnce without the once-per-run suppression.
+func (d *ipPrefDial) noteAlways(key, format string, args ...any) {
+	d.noteLevel(key, true, format, args...)
+}
+
+func (d *ipPrefDial) noteLevel(key string, sticky bool, format string, args ...any) {
 	d.mu.Lock()
-	if d.noted[host] || d.note == nil {
+	if d.note == nil || (d.noted[key] && !sticky) {
 		d.mu.Unlock()
 		return
 	}
-	d.noted[host] = true
+	d.noted[key] = true
 	note := d.note
 	d.mu.Unlock()
 	note(format, args...)
@@ -227,6 +244,16 @@ func whyUnreachable(sysErr, dialErr error) string {
 	return trimErr(dialErr)
 }
 
+// pickIPv4 returns the first IPv4 address, which is what a SOCKS4 tunnel needs.
+func (d *ipPrefDial) pickIPv4(ips []net.IP) (net.IP, bool) {
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			return ip, true
+		}
+	}
+	return nil, false
+}
+
 // dohResolver is a tiny JSON DNS client (RFC 8484 companion API) that speaks to
 // Cloudflare/Google/dnspod/alidns style endpoints. It uses its own transport
 // with a plain dialer so resolution can never recurse into itself.
@@ -240,7 +267,7 @@ type dohResolver struct {
 	stamps map[string]time.Time
 }
 
-func newDoHResolver(servers []string) *dohResolver {
+func newDoHResolver(servers []string, proxy *proxySpec) *dohResolver {
 	if len(servers) == 0 {
 		servers = DefaultDoHServers
 	}
@@ -251,6 +278,11 @@ func newDoHResolver(servers []string) *dohResolver {
 		TLSHandshakeTimeout:   6 * time.Second,
 		ResponseHeaderTimeout: 6 * time.Second,
 		ForceAttemptHTTP2:     true,
+	}
+	// The DoH query must reach the resolver too: on a proxy-only network a
+	// direct HTTPS request to dns.alidns.com never leaves the machine.
+	if proxy != nil {
+		_ = applyProxy(tr, nil, proxy)
 	}
 	return &dohResolver{
 		servers: servers,

@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,15 +23,18 @@ import (
 
 // Options is the resolved command line configuration.
 type Options struct {
-	Images       []string
-	Tags         []string
-	Platform     string
-	Mirrors      []string
-	Concurrency  int
-	PreferIPv4   bool
-	Resolves     []string
-	DoH          []string
-	NoDoH        bool
+	Images      []string
+	Tags        []string
+	Platform    string
+	Mirrors     []string
+	Concurrency int
+	PreferIPv4  bool
+	Resolves    []string
+	DoH         []string
+	NoDoH       bool
+	// Proxy routes every outbound request (and the DoH lookups) through
+	// http/https/socks4/socks4a/socks5, or "direct" to ignore HTTP_PROXY.
+	Proxy        string
 	ChunkSize    int64
 	CacheDir     string
 	Output       string
@@ -88,6 +92,18 @@ func Pull(ctx context.Context, o *Options) ([]Result, error) {
 	st.KeepParts = o.KeepParts
 	if err != nil {
 		return nil, err
+	}
+	if !o.Quiet {
+		switch {
+		case o.Proxy == "":
+			if v := firstEnvProxy(); v != "" {
+				fmt.Fprintf(os.Stderr, "  · 按环境变量走代理 %s（不想用就加 --proxy direct）\n", v)
+			}
+		case strings.EqualFold(o.Proxy, "direct"):
+			fmt.Fprintln(os.Stderr, "  · 已按 --proxy direct 忽略环境变量里的代理设置")
+		default:
+			fmt.Fprintf(os.Stderr, "  · 所有请求经由 %s 出站\n", o.Proxy)
+		}
 	}
 	var results []Result
 	for _, image := range o.Images {
@@ -286,6 +302,16 @@ func pullOne(ctx context.Context, o *Options, st *store.Store, image string) (Re
 	_ = blobs
 	_ = parts
 	return out, nil
+}
+
+// firstEnvProxy reports the proxy the environment would impose, if any.
+func firstEnvProxy() string {
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func refSpec(r reference.Ref) string {

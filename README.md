@@ -87,6 +87,7 @@ dpull version
 | `--check-diffids` | 关 | 导入前逐层解压比对 `rootfs.diff_ids`（最严格） |
 | `--ipv4-first` | 开 | 优先 IPv4；IPv6 更通畅时 `--ipv4-first=false` |
 | `--resolve 域名=IP` | 无 | 绕过污染 DNS，可重复 |
+| `--proxy URL` | 跟随环境变量 | 走代理：`http://` `https://` `socks5://` `socks5h://` `socks4://` `socks4a://`，支持 `user:pass@`；`direct` = 忽略 `HTTP_PROXY` |
 | `--no-auto-source` | 关 | 关闭内置备用源，只走官方源与你给的 mirror |
 | `--prefer-builtin` | 关 | 先试内置备用源再试官方源 |
 | `--doh URL` | 内置 4 个 | 自定义 DoH（dns-json）地址，可重复；默认 `doh.pub → alidns → cloudflare → google` |
@@ -97,7 +98,7 @@ dpull version
 | `--user` / `--password` | 无 | registry 凭据；也读 `DPULL_USERNAME/DPULL_PASSWORD` 与 `~/.docker/config.json`（含 credsStore helper） |
 | `-q, --quiet`、`--json`、`--dry-run` | 关 | 精简 / 机器可读 / 只列计划 |
 
-环境变量：`DPULL_MIRRORS`（逗号分隔）、`DPULL_CONCURRENCY`、`DPULL_CHUNK`、`DPULL_CACHE`、
+环境变量：`DPULL_PROXY`、`DPULL_MIRRORS`（逗号分隔）、`DPULL_CONCURRENCY`、`DPULL_CHUNK`、`DPULL_CACHE`、
 `DPULL_PLATFORM`、`DPULL_RETRIES`、`DPULL_PRUNE_DAYS`、`DPULL_DEBUG=1`（打印鉴权与拨号细节）。
 
 ## 实测（本机，mcr.microsoft.com，2026-09-13）
@@ -161,6 +162,43 @@ dpull version
 
 > 第三方缓存本质上是中间人，可信度来自内容校验而不是它的名字。要绝对确信，就拿官方渠道给出的 digest 对一次：`dpull sources` 里 `ecr` 那一行是 AWS 官方副本，用它做交叉印证最稳。
 
+## 用代理：`--proxy`
+
+代理是**唯一能同时解决 DNS 污染和 SNI 干扰**的办法（DoH/`--resolve` 只能解决前者）。
+
+```bash
+# HTTP / SOCKS5 混合端口（Clash 一类工具的默认 7890）
+dpull pull nginx:1.27 --proxy http://127.0.0.1:7890
+
+# 纯 SOCKS5 端口（常见 1080 / 10808），大陆网络推荐 socks5h
+dpull pull nginx:1.27 --proxy socks5h://127.0.0.1:1080
+
+# 带认证
+dpull pull nginx:1.27 --proxy socks5://me:s3cret@192.168.1.20:1080
+
+# 临时不用代理（哪怕环境变量里有个失效的 HTTPS_PROXY）
+dpull pull nginx:1.27 --proxy direct
+```
+
+| 协议 | 谁解析域名 | 说明 |
+| --- | --- | --- |
+| `http://` `https://` | 本机 | 对 https 目标走 `CONNECT`；`https://` 指代理自身用 TLS |
+| `socks5://` | **本机** | 本机 DNS 被污染时，解析仍会被污染（dpull 的 DoH 兜底在这里也生效） |
+| `socks5h://` | **代理端** | 域名原样交给代理解析 —— 大陆网络推荐这个 |
+| `socks4://` | 本机 | 只支持 IPv4 目标 |
+| `socks4a://` | 代理端 | 同上，域名交给代理 |
+
+行为细节：
+
+- **本机 registry 永远不走代理**（`localhost` / `127.0.0.1`），所以全局挂了代理也不会把 `localhost:5000` 送去绕一圈。
+- 不写 `--proxy` 时照旧遵守 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`；写了就以它为准。
+- 代理自己也走同一套解析链路，所以**代理域名被污染时也能靠 DoH 连上**。
+- 代理挂了会立刻停下并给出针对性建议，不会把剩下所有源都试一遍浪费你时间。
+- 也可以用环境变量 `DPULL_PROXY` 固定。
+
+> **一个必须知道的坑**：代理能不能绕过 SNI 干扰，取决于流量是不是从**境外节点**出去。如果代理软件对该域名走 `DIRECT`（直连规则），TLS 的 ClientHello 还是从你本机发出、SNI 照样被看到、照样被 RST。把 docker 相关域名设成走节点，或直接开 TUN 模式。
+> 本机验证的是「代理链路接通、数据正确、校验通过」，境外出口的实际抗干扰效果需要你有真实节点时再验一次。
+
 ## DNS 被污染了怎么办（本机实测结论）
 
 同一台机器上实测，Docker Hub 拉不动其实是**两层叠加**的问题，要分开看：
@@ -168,7 +206,7 @@ dpull version
 | 层次 | 现象 | 能否靠客户端解决 |
 | --- | --- | --- |
 | **DNS 污染** | `registry-1.docker.io` 被解析到黑洞地址（A `128.242.250.155`、AAAA `2001::6ca0:a262`）；连直接向 `8.8.8.8` / `223.5.5.5` 发 UDP/53 查询也返回同样的黑洞答案 —— 上游 53 端口被透明劫持 | ✅ 能。DoH 拿到的是真答案（`doh.pub` 给出 `3.225.102.148` 等 AWS 真实 IP）。dpull 默认在「系统解析的地址全连不上」时自动 DoH 重解析并打印提示 |
-| **SNI / IP 层干扰** | 用真实 IP 直连时 TLS 握手被 `connection reset`；同一批 IP 过一会儿又能返回 401 | ❌ 客户端解决不了。只能 `--mirror` 加速地址，或 `HTTPS_PROXY` 走代理 |
+| **SNI / IP 层干扰** | 用真实 IP 直连时 TLS 握手被 `connection reset`；同一批 IP 过一会儿又能返回 401 | ❌ 客户端解决不了。只能 `--mirror` 加速地址，或 `--proxy` 走代理 |
 
 三步自查（可直接抄，能明确区分上面两层）：
 
@@ -186,7 +224,7 @@ curl -s --resolve registry-1.docker.io:443:<真IP> -o /dev/null \
 
 1. **最省事**：不动 DNS，只用镜像加速地址 —— 写进 `~/.docker/daemon.json` 的 `registry-mirrors`，dpull 会自动读取，Docker 本身也受益。
 2. **本地干净解析器**：用 mihomo / sing-box / AdGuard Home / NextDNS profile 之类把系统 DNS 指到 `127.0.0.1`，上行走 DoH/DoT（本机实测 853 端口是通的）。注意只改路由器 DNS 没用，UDP/53 会被劫持。
-3. **走代理**：`export HTTPS_PROXY=http://127.0.0.1:<port>`，污染和 SNI 干扰一起解决，`docker` 与 `dpull` 都吃这个变量。
+3. **走代理**：`dpull pull 镜像 --proxy http://127.0.0.1:<port>`（或 `socks5h://…`），污染和 SNI 干扰一起解决。`docker` 本身不认 `--proxy`，要让它也走代理就 `export HTTPS_PROXY=…`，两者都吃这个变量。注意代理对该域名不能走直连规则，见上一节。
 
 ## 缓存目录结构
 

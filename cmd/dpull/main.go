@@ -141,8 +141,13 @@ func advice(err error, o *app.Options) adviceBox {
 	var out adviceBox
 	add := func(s string) { out.lines = append(out.lines, s) }
 	switch {
+	case app.IsProxyError(err):
+		add("代理本身连不通：先用 curl 验证它，例如 curl -x http://127.0.0.1:7890 -I https://registry-1.docker.io/v2/")
+		add("协议要匹配：HTTP/混合端口用 http://，SOCKS 端口用 socks5:// 或 socks5h://；带认证写 socks5://user:pass@host:port")
+		add("临时不用代理：--proxy direct（会忽略 HTTP_PROXY / HTTPS_PROXY 环境变量）")
 	case strings.Contains(msg, "no route to host"), strings.Contains(msg, "i/o timeout"),
-		strings.Contains(msg, "connection reset"), strings.Contains(msg, "no such host"),
+		strings.Contains(msg, "connection reset"), strings.Contains(msg, "connection refused"),
+		strings.Contains(msg, "no such host"),
 		strings.Contains(msg, "tls handshake"), strings.Contains(msg, "context deadline"):
 		add("这个端点在当前网络不可达。先测速再挑可用端点: dpull bench " + firstImage(o) + " --mirror <加速地址>")
 		if len(o.Mirrors) == 0 {
@@ -160,8 +165,9 @@ func advice(err error, o *app.Options) adviceBox {
 		}
 		add("网络不稳定可提高容错: -c 4 --chunk 4Mi --retries 10 --stall 20s")
 		if strings.Contains(msg, "reset by peer") || strings.Contains(msg, "tls handshake") {
-			add("若日志里出现过「DoH 重新解析…」说明 DNS 污染已绕过，剩下的是 SNI/IP 层干扰：只能换 --mirror 加速地址，或设置 HTTPS_PROXY 走代理")
+			add("若日志里出现过「DoH 重新解析…」说明 DNS 污染已绕过，剩下的是 SNI/IP 层干扰：换 --mirror，或 --proxy socks5h://127.0.0.1:1080 走代理（代理是唯一能同时解决两层的办法）")
 		}
+
 	case strings.Contains(msg, "429") || strings.Contains(msg, "too many requests"):
 		add("触发速率限制了：用 --user/--password 登录，或改用云厂商的镜像加速地址")
 	case strings.Contains(msg, "401") || strings.Contains(msg, "403") || strings.Contains(msg, "unauthorized"):
@@ -256,6 +262,7 @@ func parseFlags(argv []string) (*app.Options, string, error) {
 	fs.BoolVar(&o.PreferIPv4, "ipv4-first", true, "优先连接 IPv4（IPv6 被污染/不通时必须保持）")
 	fs.Var(&resolves, "resolve", "域名固定 IP，形如 registry-1.docker.io=104.18.0.1，可重复")
 	fs.Var(&doh, "doh", "自定义 DoH 地址（dns-json），可重复；默认内置 doh.pub/alidns/cloudflare/google")
+	fs.StringVar(&o.Proxy, "proxy", envStr("DPULL_PROXY", ""), "走代理：http:// / https:// / socks5:// / socks5h:// / socks4a://，可带 user:pass@；direct 表示忽略 HTTP_PROXY")
 	fs.BoolVar(&o.NoDoH, "no-doh", false, "关闭 DoH 兜底解析（默认：系统解析的地址全连不上时自动启用）")
 	fs.StringVar(&o.DockerBin, "docker", envStr("DPULL_DOCKER_BIN", "docker"), "docker 可执行文件路径")
 	fs.IntVar(&o.PruneDays, "days", envInt("DPULL_PRUNE_DAYS", 7), "prune 子命令：删除多少天以前的缓存")
@@ -273,6 +280,9 @@ func parseFlags(argv []string) (*app.Options, string, error) {
 	o.PushTargets = pushes
 	o.Resolves = resolves
 	o.DoH = doh
+	if err := app.CheckProxy(o.Proxy); err != nil {
+		return nil, "", err
+	}
 	o.PlainHTTP = plainHTTP
 	if len(fs.Args()) == 0 && sub != "prune" && sub != "bench" {
 		return o, sub, errors.New("请指定要下载的镜像，例如 dpull pull nginx:1.27")
@@ -503,6 +513,8 @@ func usage(sub string) {
       --ipv4-first      优先走 IPv4（默认开）；IPv6 可用时可 --ipv4-first=false
       --resolve H=IP    固定解析结果，绕过被污染的 DNS，可重复
       --no-doh          关闭 DoH 兜底（默认系统解析的地址全连不上时自动用 DoH 重解析）
+      --proxy URL       走代理：http:// https:// socks5:// socks5h:// socks4a://（支持 user:pass@）
+                        direct = 忽略 HTTP_PROXY/HTTPS_PROXY；本机 registry 永远不走代理
       --dry-run         只列出层列表与大小
   -q, --quiet           精简输出
       --json            结果以 JSON 输出
@@ -521,7 +533,7 @@ func usage(sub string) {
       --plain-http HOST 允许指定地址走 http，可重复
       --skip-tls-verify 跳过 TLS 证书校验（自建仓库）
 
-环境变量: DPULL_MIRRORS / DPULL_CONCURRENCY / DPULL_CHUNK / DPULL_CACHE / DPULL_PLATFORM /
+环境变量: DPULL_PROXY / DPULL_MIRRORS / DPULL_CONCURRENCY / DPULL_CHUNK / DPULL_CACHE / DPULL_PLATFORM /
           DPULL_RETRIES / DPULL_PRUNE_DAYS / DPULL_USERNAME / DPULL_PASSWORD / DPULL_DEBUG=1
 
 示例:
@@ -531,6 +543,7 @@ func usage(sub string) {
   dpull pull postgres:16 -o ./postgres16.tar --no-load
   dpull bench alpine:3.20 --mirror https://mirror.example.com
   dpull sources                       看哪个内置源最快、内容是否一致
+  dpull pull nginx:1.27 --proxy socks5h://127.0.0.1:1080   走代理（能同时绕开 DNS 污染与 SNI 干扰）
   dpull pull nginx:1.27 --no-auto-source   只走官方源（排查内容差异时用）
   dpull pull golang:1.23 --push registry.cn-hangzhou.aliyuncs.com/me/golang:1.23
 

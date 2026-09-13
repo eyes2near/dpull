@@ -24,6 +24,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -237,14 +238,22 @@ func resolveWithSources(ctx context.Context, o *Options, ref reference.Ref, spec
 			chainErr = err
 			// A deliberate answer (unknown tag, bad credentials) must not be retried
 			// through a cache: that masks the real problem and can resolve a typo
-			// into some other build.
-			if o.NoAutoSource || preferBuiltins || !isNetworkError(err) {
+			// into some other build. Equally, a dead proxy is a local
+			// misconfiguration that no number of sources can work around.
+			if o.NoAutoSource || preferBuiltins || errors.Is(err, registry.ErrProxy) || !isNetworkError(err) {
 				return nil, nil, err
 			}
 			cli.Logf("%s 不可达，正在尝试内置备用源…", ref.Host())
 			continue
 		}
 		cli.Logf("%s 失败: %s", sourceLabel(at.name), trimErr(err))
+		if errors.Is(err, registry.ErrProxy) {
+			// the proxy is down; walking the rest of the table is pointless
+			if chainErr == nil {
+				chainErr = err
+			}
+			break
+		}
 		if chainErr == nil {
 			chainErr = err
 		}
@@ -289,6 +298,13 @@ type sourceRow struct {
 	Bytes   int64   `json:"bytes,omitempty"`
 	Err     string  `json:"error,omitempty"`
 }
+
+// IsProxyError reports a failure caused by the proxy itself, which the CLI turns
+// into proxy-specific advice.
+func IsProxyError(err error) bool { return errors.Is(err, registry.ErrProxy) }
+
+// CheckProxy validates a --proxy value before any work starts.
+func CheckProxy(raw string) error { return registry.CheckProxy(raw) }
 
 // Sources probes every candidate source for one image and prints what actually
 // happened, including whether the sources agree on the manifest digest.
