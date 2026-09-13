@@ -55,6 +55,10 @@ type Options struct {
 	DockerBin    string
 	PruneDays    int
 	JSON         bool
+	// NoAutoSource disables the built-in fallback sources entirely.
+	NoAutoSource bool
+	// PreferBuiltins tries the built-in sources before the origin registry.
+	PreferBuiltins bool
 
 	Username string
 	Password string
@@ -106,17 +110,11 @@ func pullOne(ctx context.Context, o *Options, st *store.Store, image string) (Re
 	if err != nil {
 		return Result{}, err
 	}
-	eps, err := endpointsFor(o, ref)
-	if err != nil {
-		return Result{}, err
-	}
-	cli := newClient(o, eps)
-
 	progress := xfer.NewProgress(os.Stderr, o.Quiet)
 	if !o.Quiet {
 		fmt.Fprintf(os.Stderr, "解析 %s (%s)\n", ref.String(), orDefault(o.Platform, "本机平台"))
 	}
-	res, err := cli.Resolve(ctx, ref.Repository, refSpec(ref), o.Platform)
+	cli, res, err := resolveWithSources(ctx, o, ref, refSpec(ref), o.Platform, o.PreferBuiltins)
 	if err != nil {
 		return Result{}, err
 	}

@@ -38,7 +38,7 @@ dpull pull nginx:1.27                       # 下载并 docker load
 dpull pull redis:7 -c 16 --chunk 16Mi       # 16 并发、16MiB 分片
 dpull pull postgres:16 -o pg16.tar --no-load  # 只导出 tar，稍后拷给别人 docker load
 dpull pull registry.k8s.io/pause:3.10 -p linux/amd64
-dpull bench alpine:3.20 --mirror https://<你的加速地址>   # 测速并给出推荐端点
+dpull sources                                       # 内置备用源 + 你的 mirror 一起实测排名
 dpull pull golang:1.23 --push registry.cn-hangzhou.aliyuncs.com/me/golang:1.23
 ```
 
@@ -61,6 +61,7 @@ dpull pull golang:1.23 --push registry.cn-hangzhou.aliyuncs.com/me/golang:1.23
 
 ```
 dpull [参数] 镜像 [镜像...]        等价于 dpull pull ...
+dpull sources [镜像]              实测内置备用源/你的 mirror，按延迟排名并校验内容一致性
 dpull bench 镜像                  逐个端点实测速度并排名
 dpull prune [--days 7]            删除过期缓存（也可用 DPULL_PRUNE_DAYS）
 dpull version
@@ -86,6 +87,8 @@ dpull version
 | `--check-diffids` | 关 | 导入前逐层解压比对 `rootfs.diff_ids`（最严格） |
 | `--ipv4-first` | 开 | 优先 IPv4；IPv6 更通畅时 `--ipv4-first=false` |
 | `--resolve 域名=IP` | 无 | 绕过污染 DNS，可重复 |
+| `--no-auto-source` | 关 | 关闭内置备用源，只走官方源与你给的 mirror |
+| `--prefer-builtin` | 关 | 先试内置备用源再试官方源 |
 | `--doh URL` | 内置 4 个 | 自定义 DoH（dns-json）地址，可重复；默认 `doh.pub → alidns → cloudflare → google` |
 | `--no-doh` | 关 | 关闭 DoH 兜底解析 |
 | `--plain-http HOST` | 无 | 允许指定地址走 http（如 `192.168.1.5:5000`），可重复 |
@@ -112,6 +115,51 @@ dpull version
 （上表劣化时段相差 2～58 倍），而断点续传让"失败重来"的代价从"整镜像重下"变成"补齐缺的几百 KB"。
 上面每一组结论都有对应的自动化测试（`TestRetriesResumeInsideChunk`、`TestResumeAcrossRunsKeepsProgress`、
 `TestForceIgnoresCache`），可离线重复。
+
+## 内置备用源：官方源不通就自动换源
+
+不用先找加速地址。**直接 `dpull pull nginx:1.27`，官方源连不上时会自动改用内置备用源**，并在日志里说明换了哪个、为什么：
+
+```
+  · registry-1.docker.io 不可达，正在尝试内置备用源…
+  · 已从 内置源 1panel 取到 manifest（官方源 registry-1.docker.io 不可达：...connection reset by peer）
+平台 linux/arm64/v8，7 层，共 65.7MiB
+完成 8/8 层，共 65.7MiB，用时 5s，平均 13.1MiB/s
+```
+
+内置清单（2026-09-13 从大陆网络实测，`dpull sources` 可随时重测）：
+
+| 源 | 地址 | 是什么 | 实测 |
+| --- | --- | --- | --- |
+| `1panel` | `docker.1panel.live` | 公开 Docker Hub 缓存 | 15.6MiB / 5s，最快 |
+| `daocloud` | `docker.m.daocloud.io` | DaoCloud 公开加速，需 token | 15.6MiB / 5s |
+| `ecr` | `public.ecr.aws/docker/...` | **AWS 官方** Docker Hub 透传副本，路径加 `docker/` 前缀 | 15.6MiB / 6s，匿名有速率限制 |
+| `xuanyuan` | `docker.xuanyuan.me` | 公开 Docker Hub 缓存 | 15.6MiB / 16s，免费额度易限流 |
+
+`docker.1ms.run` 也能拉通但同一镜像要 3m46s，**故意没放进清单**。
+
+三条设计上的硬规则，避免「自动换源」变成「自动被坑」：
+
+1. **只在网络类错误时换源**。`manifest unknown`、`401 unauthorized`、`404` 这类是 registry 的正式回答，绝不重试到别的源上——否则你打错的 tag 会被某个缓存解析成另一个构建产物。
+2. **换源后依然按该源 manifest 里的 sha256 逐层校验**，并且 `dpull sources` 会跨源比对 manifest digest，不一致会明确报警：
+   ```
+   内容一致性: 3 个源返回同一 manifest sha256:45e09956dc667c5 ✅
+   ```
+3. **记住上次赢的源**（`<缓存目录>/sources.json`，72 小时有效），下次不再先浪费 10 秒撞死掉的官方源。
+
+相关参数：
+
+| 参数 | 作用 |
+| --- | --- |
+| `dpull sources [镜像]` | 实测官方源 + 你的 `--mirror` + 内置源，按延迟排序，附内容一致性校验 |
+| `--mirror URL` | 你自己的加速地址，优先级最高；给了它就不会先撞官方源 |
+| `--no-auto-source` | 完全关闭内置源（排查内容差异时用） |
+| `--prefer-builtin` | 先试内置源再试官方源（官方源被限速但还能回话时有用） |
+| `~/.docker/daemon.json` 的 `registry-mirrors` | dpull 会自动读，Docker 自己也用同一份配置 |
+
+优先级：`--mirror` → `daemon.json` 的 mirrors → 内置备用源 → 官方源（`--prefer-builtin` 时内置源排在最前）。
+
+> 第三方缓存本质上是中间人，可信度来自内容校验而不是它的名字。要绝对确信，就拿官方渠道给出的 digest 对一次：`dpull sources` 里 `ecr` 那一行是 AWS 官方副本，用它做交叉印证最稳。
 
 ## DNS 被污染了怎么办（本机实测结论）
 
@@ -157,7 +205,7 @@ curl -s --resolve registry-1.docker.io:443:<真IP> -o /dev/null \
 
 ## 国内网络建议
 
-1. **先测速再拉**：`dpull bench alpine:3.20 --mirror <加速地址>`，它会并发拉一段真实层数据并按速度排名。
+1. **先别急着想加速地址**：直接 `dpull pull 镜像`，官方源不通会自动改用内置备用源；想看清有哪些源可用就 `dpull sources`。
 2. **加速地址从哪来**：云厂商容器镜像服务控制台都会给一个专属加速域名（阿里云 ACR「镜像工具 → 镜像加速」、
    腾讯云 TCR、华为云 SWR 等），学校/运营商也常有公共 mirror。填到 `~/.docker/daemon.json`
    的 `registry-mirrors` 里 dpull 会自动读取，也可以命令行 `--mirror` 临时指定。

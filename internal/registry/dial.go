@@ -119,7 +119,7 @@ func (d *ipPrefDial) DialContext(ctx context.Context, network, addr string) (net
 					host, whyUnreachable(sysErr, firstErr), briefAddrs(clean))
 				return conn2, nil
 			}
-			d.noteOnce(host, "%s 已用 DoH 解析到真实地址 %s，但连接仍被中断——这不是 DNS 污染，是 SNI/IP 层干扰，需要 --mirror 加速地址或 HTTPS_PROXY 代理",
+			d.noteOnce(host, "%s 改用 DoH 解析到 %s 后仍连不上：要么解析本身还在被定向污染（DoH 也给了假地址），要么是 SNI/IP 层干扰——这两种都无法靠客户端解决，需要 --mirror 加速地址或 HTTPS_PROXY 代理",
 				host, briefAddrs(clean))
 			if d.verbose {
 				debug("DoH 解析 %s -> %s，仍然连不上", host, briefAddrs(clean))

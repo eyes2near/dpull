@@ -82,6 +82,16 @@ func run(argv []string) int {
 			return 130
 		}
 		return 0
+	case "sources":
+		n, err := app.Sources(ctx, o, o.Images)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "探测失败:", err)
+			return 1
+		}
+		if n == 0 {
+			return 1
+		}
+		return 0
 	case "bench":
 		if err := app.Bench(ctx, o); err != nil {
 			fmt.Fprintln(os.Stderr, "测速失败:", err)
@@ -136,7 +146,11 @@ func advice(err error, o *app.Options) adviceBox {
 		strings.Contains(msg, "tls handshake"), strings.Contains(msg, "context deadline"):
 		add("这个端点在当前网络不可达。先测速再挑可用端点: dpull bench " + firstImage(o) + " --mirror <加速地址>")
 		if len(o.Mirrors) == 0 {
-			add("没有 --mirror 时只能直连官方源，大陆网络通常需要在 ~/.docker/daemon.json 的 registry-mirrors 里配置加速地址，或显式加 --mirror")
+			if o.NoAutoSource {
+				add("已用 --no-auto-source 关掉内置源：去掉它，或 dpull sources 看可用加速地址，或显式加 --mirror")
+			} else {
+				add("内置备用源也没能救回来：dpull sources 实测哪些源可用，再 --mirror 指定；大陆网络建议把加速地址写进 ~/.docker/daemon.json 的 registry-mirrors")
+			}
 		}
 		if o.PreferIPv4 {
 			add("已优先尝试 IPv4；若本机 IPv6 反而通畅，可加 --ipv4-first=false")
@@ -199,7 +213,7 @@ func parseFlags(argv []string) (*app.Options, string, error) {
 	sub := "pull"
 	if len(argv) > 0 {
 		switch argv[0] {
-		case "pull", "bench", "prune":
+		case "pull", "bench", "prune", "sources":
 			sub = argv[0]
 			argv = argv[1:]
 		}
@@ -217,6 +231,8 @@ func parseFlags(argv []string) (*app.Options, string, error) {
 	fs.IntVar(&o.Concurrency, "concurrency", envInt("DPULL_CONCURRENCY", 8), "并发连接数")
 	fs.StringVar(&o.ChunkSizeS, "chunk", envStr("DPULL_CHUNK", "8Mi"), "单个分片大小，如 4Mi/16Mi/1M")
 	fs.Var(&mirrors, "mirror", "镜像加速地址，可重复或逗号分隔，按顺序尝试")
+	fs.BoolVar(&o.PreferBuiltins, "prefer-builtin", false, "优先试内置备用源（默认只在官方源网络不可达后才试）")
+	fs.BoolVar(&o.NoAutoSource, "no-auto-source", false, "只用官方源/你指定的 --mirror，不使用内置备用源")
 	fs.StringVar(&o.CacheDir, "cache", envStr("DPULL_CACHE", defaultCacheDir()), "缓存/断点目录")
 	fs.StringVar(&o.Output, "o", "", "输出文件（docker-archive 的 tar 路径，或 --format oci 时的目录）")
 	fs.StringVar(&o.Output, "output", "", "--output 的长写法")
@@ -464,6 +480,7 @@ func usage(sub string) {
 
 用法:
   dpull [参数] 镜像 [镜像...]          等价于 dpull pull ...
+  dpull sources [镜像]                 实测内置备用源与你的 --mirror，按速度排序并校验内容一致性
   dpull bench 镜像                     测速各镜像加速地址，给出推荐
   dpull prune [--days 7]               清理过期缓存
   dpull version                        显示版本
@@ -473,6 +490,9 @@ func usage(sub string) {
       --chunk SIZE      分片大小，默认 8Mi；大文件建议 8Mi~32Mi
   -p, --platform OS/ARCH[/VARIANT]  指定架构，默认跟随本机
       --mirror URL      镜像加速地址，可重复；顺序即优先级
+                        不指定时：官方源网络不可达会自动改用内置备用源（dpull sources 可查清单）
+      --no-auto-source  禁用内置备用源，只走官方源与你指定的 mirror
+      --prefer-builtin  先试内置备用源再试官方源
       --cache DIR       缓存目录，默认 ~/.cache/dpull
   -o, --output PATH     导出路径；不指定时导入 docker 后自动删除
       --format FMT      docker-archive（默认）| oci | none
@@ -510,6 +530,8 @@ func usage(sub string) {
   dpull pull redis:7 --mirror https://mirror.example.com --mirror https://origin.example.com
   dpull pull postgres:16 -o ./postgres16.tar --no-load
   dpull bench alpine:3.20 --mirror https://mirror.example.com
+  dpull sources                       看哪个内置源最快、内容是否一致
+  dpull pull nginx:1.27 --no-auto-source   只走官方源（排查内容差异时用）
   dpull pull golang:1.23 --push registry.cn-hangzhou.aliyuncs.com/me/golang:1.23
 
 中断后重新执行同一条命令即可从断点继续；全部数据都会做 sha256 校验。
