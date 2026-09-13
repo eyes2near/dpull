@@ -24,8 +24,8 @@
 ## 安装
 
 ```bash
-make build                     # → bin/dpull
-sudo make install              # → /usr/local/bin/dpull
+make install                   # → ~/.local/bin/dpull 并在任意 shell 可用（免 sudo）
+make build                     # → 只编译到 bin/dpull，不安装
 make dist                      # 交叉编译 mac/linux × arm64/amd64 到 dist/
 ```
 
@@ -225,6 +225,25 @@ curl -s --resolve registry-1.docker.io:443:<真IP> -o /dev/null \
 1. **最省事**：不动 DNS，只用镜像加速地址 —— 写进 `~/.docker/daemon.json` 的 `registry-mirrors`，dpull 会自动读取，Docker 本身也受益。
 2. **本地干净解析器**：用 mihomo / sing-box / AdGuard Home / NextDNS profile 之类把系统 DNS 指到 `127.0.0.1`，上行走 DoH/DoT（本机实测 853 端口是通的）。注意只改路由器 DNS 没用，UDP/53 会被劫持。
 3. **走代理**：`dpull pull 镜像 --proxy http://127.0.0.1:<port>`（或 `socks5h://…`），污染和 SNI 干扰一起解决。`docker` 本身不认 `--proxy`，要让它也走代理就 `export HTTPS_PROXY=…`，两者都吃这个变量。注意代理对该域名不能走直连规则，见上一节。
+
+## 安装到任意 shell
+
+```bash
+make install          # 默认装到 ~/.local/bin/dpull（已在 PATH 上，无需 sudo）
+make install PREFIX=/usr/local/bin   # 装到系统目录（该目录需存在且可写，可能要 sudo）
+make uninstall        # 移除
+```
+
+`~/.local/bin` 由 `~/.zshrc` 加入 PATH；bash 登录 shell 走 `~/.profile`，非登录交互走
+`~/.bashrc`，都已覆盖。装完直接：
+
+```bash
+dpull pull nginx:1.27
+dpull sources
+```
+
+> 改了源码要重新 `make install`，否则 shell 里用的还是旧副本（Agent Skill 里已内置
+> "源码更新就自动重装"的判断）。
 
 ## 给 Agent 用：内置 Skill
 

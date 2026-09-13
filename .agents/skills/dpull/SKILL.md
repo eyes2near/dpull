@@ -12,8 +12,12 @@ compatibility: macOS/Linux 单二进制，无需 Docker 即可下载与导出；
 
 ```bash
 REPO=/Users/vicky/Desktop/PiProjects/docker-image-downloader
-DPULL=${DPULL:-$(command -v dpull || echo "$REPO/bin/dpull")}
-[ -x "$DPULL" ] || (cd "$REPO" && make build)   # 或 go build -o bin/dpull ./cmd/dpull
+DPULL=${DPULL:-$(command -v dpull || echo "$REPO/bin/dpull")}   # 通常已装在 ~/.local/bin
+# 源码比在用的二进制新就先重装：别拿旧副本干活（新参数会报"参数错误"）
+if [ -d "$REPO" ] && [ -n "$(find "$REPO/cmd" "$REPO/internal" -name '*.go' -newer "$DPULL" 2>/dev/null | head -1)" ]; then
+  (cd "$REPO" && make install)
+fi
+[ -x "$DPULL" ] || (cd "$REPO" && make install)
 "$DPULL" version
 ```
 

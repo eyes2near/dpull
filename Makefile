@@ -1,10 +1,12 @@
 PKG := dpull/internal
 BIN := dpull
 OUT := bin/$(BIN)
-PREFIX ?= /usr/local/bin
+# 安装目录：默认 ~/.local/bin —— 已在 PATH 上且不需要 sudo。
+# 想装到系统目录：make install PREFIX=/usr/local/bin（该目录需已存在且可写，否则要 sudo）
+PREFIX ?= $(HOME)/.local/bin
 PKGS := ./...
 
-.PHONY: build install test race vet fmt lint clean dist help
+.PHONY: build install uninstall test race vet fmt lint clean dist help
 
 help: ## 显示可用目标
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-10s\033[0m %s\n",$$1,$$2}'
@@ -13,8 +15,18 @@ build: ## 编译当前平台到 bin/dpull
 	@mkdir -p bin
 	go build -trimpath -ldflags "-s -w" -o $(OUT) ./cmd/dpull
 
-install: ## 安装到 /usr/local/bin/dpull（可用 PREFIX 覆盖）
+install: ## 安装到 $(PREFIX)，默认 ~/.local/bin（已在 PATH 上）
+	@mkdir -p $(DESTDIR)$(PREFIX)
 	go build -trimpath -ldflags "-s -w" -o $(DESTDIR)$(PREFIX)/$(BIN) ./cmd/dpull
+	@echo "已安装 -> $(DESTDIR)$(PREFIX)/$(BIN)"
+	@case ":$$PATH:" in *":$(DESTDIR)$(PREFIX):"*) ;; \
+	  *) echo "提示：$(DESTDIR)$(PREFIX) 不在当前 PATH 上，请加入 ~/.zshrc 或 ~/.profile："; \
+	     echo "      export PATH=\"$(DESTDIR)$(PREFIX):\$$PATH\"" ;; esac
+	@$(DESTDIR)$(PREFIX)/$(BIN) version
+
+uninstall: ## 删除 $(DESTDIR)$(PREFIX)/$(BIN)
+	rm -f $(DESTDIR)$(PREFIX)/$(BIN)
+	@echo "已移除 $(DESTDIR)$(PREFIX)/$(BIN)"
 
 test: ## 单元测试
 	go test $(PKGS)
