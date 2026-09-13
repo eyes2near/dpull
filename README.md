@@ -226,6 +226,34 @@ curl -s --resolve registry-1.docker.io:443:<真IP> -o /dev/null \
 2. **本地干净解析器**：用 mihomo / sing-box / AdGuard Home / NextDNS profile 之类把系统 DNS 指到 `127.0.0.1`，上行走 DoH/DoT（本机实测 853 端口是通的）。注意只改路由器 DNS 没用，UDP/53 会被劫持。
 3. **走代理**：`dpull pull 镜像 --proxy http://127.0.0.1:<port>`（或 `socks5h://…`），污染和 SNI 干扰一起解决。`docker` 本身不认 `--proxy`，要让它也走代理就 `export HTTPS_PROXY=…`，两者都吃这个变量。注意代理对该域名不能走直连规则，见上一节。
 
+## 给 Agent 用：内置 Skill
+
+仓库自带一个 Agent Skill（[.agents/skills/dpull/](.agents/skills/dpull/SKILL.md)），让 agent 遇到
+「镜像拉不动」时知道要用 dpull、按退出码判断成败、知道怎么分诊，而不是反复重试
+`docker pull` 或自己去 curl registry API。
+
+```bash
+# 装到全局（真实目录 + 软链文件，改仓库文档不会漂移）
+mkdir -p ~/.agents/skills/dpull
+R="$PWD/.agents/skills/dpull"
+ln -sfn "$R/SKILL.md" ~/.agents/skills/dpull/SKILL.md
+ln -sfn "$R/references" ~/.agents/skills/dpull/references
+```
+
+结构（渐进式披露：只有关键词命中时 agent 才展开正文）：
+
+```
+.agents/skills/dpull/
+├── SKILL.md                        触发条件、定位二进制、默认命令、退出码、失败分诊表
+└── references/troubleshooting.md   DNS 污染 vs SNI 干扰的三步自查、日志行解读、选源信任、代理坑、参数速查
+```
+
+已验证：新开会话问「nginx:1.27 用 docker pull 一直超时」，agent 自动加载本 skill 并给出
+`"$DPULL" pull nginx:1.27 --json`（而不是重试 docker pull）。
+
+按 Agent Skills 标准编写，pi / Claude Code / Codex 等同类 harness 可直接用同一份目录，
+或在其 settings 里把 `.agents/skills` 加进 skills 搜索路径。
+
 ## 缓存目录结构
 
 ```
