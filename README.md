@@ -359,7 +359,7 @@ gofmt 检查 → go vet → go test -race ./...
 > 与其留一个必然红的格子，不如排除掉并注明原因。语言下限在 ubuntu 上照样覆盖。
 
 打 tag（`git tag v1.0.1 && git push --tags`）会自动编译 4 个平台并挂到 GitHub Release；
-也可以在 Actions 页面手动触发一次同样的构建。测试全部离线自测（假 registry：随机断流、
+在 Actions 页面手动触发则只建**草稿** Release（不会污染公开版本列表），用于验证构建本身。测试全部离线自测（假 registry：随机断流、
 谎报 Range、返回错误数据、push 收端），不依赖外网，所以 CI 结果不会因为网络而抖动。
 
 ## 许可

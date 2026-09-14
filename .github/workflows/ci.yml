@@ -92,10 +92,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 手动触发只建草稿，避免手一下就在公开 Releases 里留下假版本
-          tag="${GITHUB_REF_NAME:-draft-ci-$GITHUB_RUN_NUMBER}"
-          extra=""
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then extra="--draft"; fi
+          # 手动触发只建草稿，避免手一下就在公开 Releases 里留下假版本。
+          # 注意 dispatch 时 GITHUB_REF_NAME 是分支名（main），不能当版本号用。
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="draft-ci-$GITHUB_RUN_NUMBER"; extra="--draft"
+          else
+            tag="$GITHUB_REF_NAME"; extra=""
+          fi
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" $extra --generate-notes --title "$tag"
           fi
