@@ -92,8 +92,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${GITHUB_REF_NAME:-ci-draft}"
+          # 手动触发只建草稿，避免手一下就在公开 Releases 里留下假版本
+          tag="${GITHUB_REF_NAME:-draft-ci-$GITHUB_RUN_NUMBER}"
+          extra=""
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then extra="--draft"; fi
           if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --generate-notes --title "$tag"
+            gh release create "$tag" $extra --generate-notes --title "$tag"
           fi
           gh release upload "$tag" dist/dpull-* --clobber
