@@ -19,7 +19,8 @@ import (
 	"dpull/internal/xfer"
 )
 
-const version = "1.0.0"
+// version 可通过 -ldflags "-X main.version=..." 注入（CI 打 tag 时用）。
+var version = "1.0.0"
 
 // listFlag collects repeated flag values.
 type listFlag []string

@@ -1,6 +1,7 @@
 # dpull — 多线程 + 断点续传的 Docker 镜像下载器
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+![ci](https://github.com/eyes2near/dpull/actions/workflows/ci.yml/badge.svg)
 
 面向中国大陆的不稳定网络：把一个镜像的每一层切成固定大小的分片并发下载，
 中断后重跑同一条命令即可从断点继续，全部数据按 manifest 里的 sha256 逐层校验，
@@ -341,6 +342,19 @@ internal/app/         端到端编排 + 假 registry 测试（含随机断流、
 测试里最关键的一条是 **`TestPullWritesValidDockerArchive`**（假 registry 会随机断流、返回错误数据、假装支持 Range）：它校验 tar 里的层顺序、文件名与
 `rootfs.diff_ids` 逐一对应 —— 这正是 `docker load` 的判定条件（见 moby `image/tarexport/load.go`
 的 `archive.DecompressStream` + diffID 比对），因此不依赖本机 Docker 也能证明产物可导入。
+
+## CI
+
+每次 push / PR 都会跑（`linux` 与 `macos` × `go 1.22.x` 与 `stable` 四个组合）：
+
+```
+gofmt 检查 → go vet → go test -race ./...
+                     └─ 交叉编译 4 个平台并上传构建产物
+```
+
+打 tag（`git tag v1.0.1 && git push --tags`）会自动编译 4 个平台并挂到 GitHub Release；
+也可以在 Actions 页面手动触发一次同样的构建。测试全部离线自测（假 registry：随机断流、
+谎报 Range、返回错误数据、push 收端），不依赖外网，所以 CI 结果不会因为网络而抖动。
 
 ## 许可
 

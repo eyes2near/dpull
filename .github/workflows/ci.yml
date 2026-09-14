@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test / ${{ matrix.os }} / go ${{ matrix.go }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go: ["1.22.x", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: gofmt
+        run: make fmt-check
+
+      - name: vet
+        run: go vet ./...
+
+      # 并发下载器 + 断点续传状态机，竞态检测不能省
+      - name: test (race)
+        run: go test -race -count=1 ./...
+
+  dist:
+    name: cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: build 4 platforms
+        run: make dist
+
+      - name: 产物自检
+        run: |
+          ls -la dist
+          file dist/dpull-linux-amd64
+          ./dist/dpull-darwin-arm64 version || echo "(非 mac 宿主，跳过运行校验)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dpull-binaries
+          path: dist/dpull-*
+          if-no-files-found: error
+
+  # 打 tag（v1.2.3）或手动触发时，把 4 个平台的二进制挂到 Release 上
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: [test, dist]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: build 4 platforms
+        run: make dist VERSION="${GITHUB_REF_NAME:-dev}"
+
+      - name: upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME:-ci-draft}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --generate-notes --title "$tag"
+          fi
+          gh release upload "$tag" dist/dpull-* --clobber
