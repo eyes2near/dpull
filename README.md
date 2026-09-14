@@ -1,5 +1,7 @@
 # dpull — 多线程 + 断点续传的 Docker 镜像下载器
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 面向中国大陆的不稳定网络：把一个镜像的每一层切成固定大小的分片并发下载，
 中断后重跑同一条命令即可从断点继续，全部数据按 manifest 里的 sha256 逐层校验，
 最后直接 `docker load` 进本机 Docker（也可以只导出 tar / OCI layout / 再推送到你自己的仓库）。
@@ -339,3 +341,8 @@ internal/app/         端到端编排 + 假 registry 测试（含随机断流、
 测试里最关键的一条是 **`TestPullWritesValidDockerArchive`**（假 registry 会随机断流、返回错误数据、假装支持 Range）：它校验 tar 里的层顺序、文件名与
 `rootfs.diff_ids` 逐一对应 —— 这正是 `docker load` 的判定条件（见 moby `image/tarexport/load.go`
 的 `archive.DecompressStream` + diffID 比对），因此不依赖本机 Docker 也能证明产物可导入。
+
+## 许可
+
+MIT © [eyes2near](https://github.com/eyes2near) —— 见 [LICENSE](LICENSE)。
+随便用、随便改、随便商用，保留版权声明即可。
