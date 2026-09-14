@@ -11,15 +11,19 @@ compatibility: macOS/Linux 单二进制，无需 Docker 即可下载与导出；
 ## 0. 先定位可执行文件
 
 ```bash
-REPO=/Users/vicky/Desktop/PiProjects/docker-image-downloader
-DPULL=${DPULL:-$(command -v dpull || echo "$REPO/bin/dpull")}   # 通常已装在 ~/.local/bin
-# 源码比在用的二进制新就先重装：别拿旧副本干活（新参数会报"参数错误"）
+# 已安装副本优先（make install 的落点）
+DPULL=${DPULL:-$(command -v dpull || echo "$HOME/.local/bin/dpull")}
+
+# 若源码比在用的二进制更新，先重装：别拿旧副本干活（新参数会报「参数错误」）
+REPO=<仓库根>   # = 本 SKILL.md 往上三级：.agents/skills/dpull/SKILL.md
 if [ -d "$REPO" ] && [ -n "$(find "$REPO/cmd" "$REPO/internal" -name '*.go' -newer "$DPULL" 2>/dev/null | head -1)" ]; then
   (cd "$REPO" && make install)
 fi
 [ -x "$DPULL" ] || (cd "$REPO" && make install)
 "$DPULL" version
 ```
+
+本机已经 `make install` 过时，上面整段可以跳过，直接用 `dpull`。
 
 ## 1. 默认动作（90% 情况就这一条）
 
