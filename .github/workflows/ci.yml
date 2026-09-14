@@ -19,6 +19,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         go: ["1.22.x", "stable"]
+        exclude:
+          # go1.22 编出的测试二进制在新版 macOS 上会被 dyld 拒载：
+          # "missing LC_UUID load command" + abort trap —— 一个用例都没跑就 FAIL，
+          # 看起来像测试挂了。实测 -ldflags=-linkmode=internal 也绕不过
+          # （-race 在 darwin 上要走外部链接），Go 1.23 起才修好。
+          # 语言下限仍由 ubuntu 上的 go1.22.x 覆盖。
+          - os: macos-latest
+            go: 1.22.x
     steps:
       - uses: actions/checkout@v7
 
@@ -32,18 +40,9 @@ jobs:
       - name: vet
         run: go vet ./...
 
-      # 并发下载器 + 断点续传状态机，竞态检测不能省。
-      # macOS 上如果 Go < 1.23，外部链接器不写 LC_UUID，新版 dyld 会直接
-      # 拒绝加载测试二进制（"missing LC_UUID load command" + abort trap，
-      # 看着像测试挂了，其实一个用例都没跑）。用内部链接器绕开。
+      # 并发下载器 + 断点续传状态机，竞态检测不能省
       - name: test (race)
-        run: |
-          extra=""
-          if [ "$RUNNER_OS" = "macOS" ] && ! go version | grep -qE 'go1\.(2[3-9]|[3-9][0-9])'; then
-            echo "go < 1.23 on macOS：改用内部链接器（LC_UUID）"
-            extra="-ldflags=-linkmode=internal"
-          fi
-          go test -race -count=1 $extra ./...
+        run: go test -race -count=1 ./...
 
   dist:
     name: cross-compile

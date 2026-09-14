@@ -345,12 +345,18 @@ internal/app/         端到端编排 + 假 registry 测试（含随机断流、
 
 ## CI
 
-每次 push / PR 都会跑（`linux` 与 `macos` × `go 1.22.x` 与 `stable` 四个组合）：
+每次 push / PR 都会跑：`ubuntu` 上测 `go 1.22.x` + `stable`（验证 go.mod 声明的语言下限），
+`macos` 上测 `stable`：
 
 ```
 gofmt 检查 → go vet → go test -race ./...
                      └─ 交叉编译 4 个平台并上传构建产物
 ```
+
+> macOS + Go 1.22 这个组合被显式排除：go1.22 产出的测试二进制在新版 macOS 上会被
+> dyld 以 `missing LC_UUID load command` 直接拒载（`-race` 在 darwin 必须外部链接，
+> `-linkmode=internal` 也绕不过，Go 1.23 起修好）。这是工具链与系统的问题，与本项目代码无关 ——
+> 与其留一个必然红的格子，不如排除掉并注明原因。语言下限在 ubuntu 上照样覆盖。
 
 打 tag（`git tag v1.0.1 && git push --tags`）会自动编译 4 个平台并挂到 GitHub Release；
 也可以在 Actions 页面手动触发一次同样的构建。测试全部离线自测（假 registry：随机断流、
