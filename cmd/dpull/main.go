@@ -20,7 +20,9 @@ import (
 )
 
 // version 可通过 -ldflags "-X main.version=..." 注入（CI 打 tag 时用）。
-var version = "1.0.0"
+// 这里的默认值是「源码自己声称的版本」：无 tag / 无 ldflags 构建时靠它，
+// 所以发版要和 tag 一起改（CI 会用 tag 名覆盖它）。
+var version = "1.1.0"
 
 // listFlag collects repeated flag values.
 type listFlag []string

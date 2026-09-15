@@ -1,7 +1,7 @@
 ---
 name: dpull
-description: 用 dpull 下载/搬运 Docker 镜像——多线程分片、断点续传、自动换源、DoH 绕 DNS 污染、可走代理，最后导入本机 Docker。当用户说"拉个镜像/这个镜像拉不动/docker pull 超时/离线导入镜像/把镜像推到内网仓库/换个架构版本"或遇到 registry-1.docker.io、ghcr.io、quay.io、mcr.microsoft.com 拉取失败时使用。也用于把镜像导出成 tar / OCI layout、跨机器搬运、在代理受限网络里取镜像。禁止在这种网络下直接改用 curl 手撕 registry API 或反复重试 docker pull。
-compatibility: macOS/Linux 单二进制，无需 Docker 即可下载与导出；--load 需本机 docker CLI 可用。网络受限时需可访问内置源或用户自备 mirror/代理。
+description: 用 dpull 下载/搬运 Docker 镜像——多线程分片、断点续传、自动换源（按上游分组的内置缓存：docker.io / gcr.io / registry.k8s.io / ghcr.io / quay.io / mcr.microsoft.com / nvcr.io）、DoH 绕 DNS 污染、可走代理，最后导入本机 Docker。当用户说"拉个镜像/这个镜像拉不动/docker pull 超时/离线导入镜像/把镜像推到内网仓库/换个架构版本"或遇到 registry-1.docker.io、gcr.io、registry.k8s.io、ghcr.io、quay.io、mcr.microsoft.com 拉取失败时使用。也用于把镜像导出成 tar / OCI layout、跨机器搬运、在代理受限网络里取镜像。禁止在这种网络下直接改用 curl 手撕 registry API 或反复重试 docker pull。
+compatibility: macOS/Linux 单二进制，无需 Docker 即可下载与导出；--load 需本机 docker CLI 可用。网络受限时需可访问内置源或用户自备 mirror/代理。本 skill 描述的行为需要 dpull ≥ 1.1.0（ensure-dpull.sh 会校验并升级）：内置改写缓存在 1.1.0 才覆盖 Docker Hub 以外的上游。
 ---
 
 # dpull：面向劣质网络的镜像下载器
@@ -22,12 +22,12 @@ DPULL=$(bash <本 skill 目录>/scripts/ensure-dpull.sh) # rc=0 时 stdout 才�
 | rc | 含义 | 你要做的 |
 |---|---|---|
 | `0` | stdout 是可用的 dpull 绝对路径 | 之后一律用 `"$DPULL"`，别用裸名 `dpull`（可能不在 PATH） |
-| `10` | 能装但没装 | **先向用户说明**脚本打出的计划（从哪取、装到哪），取得同意后再加 `--install` 重跑 |
+| `10` | 能装但没装（**或已装副本低于本 skill 要求的 1.1.0**，stderr 会说「准备升级」） | **先向用户说明**脚本打出的计划（从哪取、装到哪），取得同意后再加 `--install` 重跑 |
 | `11` | 获取失败（下载不通 / **sha256 校验不过** / 平台没有对应包） | 把 stderr 原样汇报给用户并**停下**。绝不静默退回 `docker pull` 硬扛，也绝不绕过校验强行装 |
 
 脚本的获取阶梯，以及为什么这么排：
 
-1. 本机已装 → 直接用；**源码比二进制新且有 Go → 自动重编译**（旧副本会报「参数错误」）。
+1. 本机已装且版本 ≥ `1.1.0` → 直接用；**源码比二进制新且有 Go → 自动重编译**（旧副本会报「参数错误」）。
 2. 在 dpull 源码检出里且有 Go → 源码编译（开发者场景，改完就该生效）。
 3. 否则**下载官方 Release 预编译二进制**，`SHA256SUMS` 逐一对账后才落地 —— **不需要 Go**。
    本机有 `gh` 时优先走 gh（它走 api.github.com，比 github.com 稳）。
@@ -41,13 +41,17 @@ DPULL=$(bash <本 skill 目录>/scripts/ensure-dpull.sh) # rc=0 时 stdout 才�
 装完不在 PATH 上只是提示一句，**不要**据此判断失败，用绝对路径继续。
 `sha256 校验不通过` 是**安全事件**，不是网络故障：立刻告诉用户，别再换源重试。
 
-## 1. 默认动作（90% 情况就这一条）## 1. 默认动作（90% 情况就这一条）
+## 1. 默认动作（90% 情况就这一条）
 
 ```bash
 "$DPULL" pull <镜像> --json
 ```
 
-不加 `--mirror`、不加 `--proxy`。它会：官方源 → 不通则自动改用内置备用源（1panel / daocloud / AWS ECR 官方透传副本 / xuanyuan）→ 校验 sha256 → `docker load`。
+不加 `--mirror`、不加 `--proxy`。它会：官方源 → 不通则自动改用内置备用源 → 校验 sha256 → `docker load`。
+
+备用源**按上游分组**，每条只认领自己那个上游：Docker Hub 走 1panel / daocloud / AWS ECR 官方透传副本 / xuanyuan；
+`gcr.io`、`registry.k8s.io`、`ghcr.io`、`quay.io`、`mcr.microsoft.com`、`nvcr.io` 也各有两家改写缓存。
+所以**不要一上来就要代理或 mirror**：Google 系、k8s 这类看起来「肯定拉不到」的上游，其实默认就能成。
 
 判断成功：**看退出码**，不要看有没有输出。
 
@@ -106,6 +110,7 @@ DPULL=$(bash <本 skill 目录>/scripts/ensure-dpull.sh) # rc=0 时 stdout 才�
 | `manifest unknown` / 404 | tag 不存在（**不会**换源重试，这是对的） | 找用户确认 tag，别换源绕 |
 | `401` / `403` / `unauthorized` | 需要登录 | `--user/--password` 或先 `docker login` |
 | `digest` / `mismatch` / 校验不过 | 源数据坏了 | `"$DPULL" pull <镜像> --force --mirror <另一个源>` |
+| `gcr.io` / `registry.k8s.io` 整体超时，日志说「DoH 解析后仍连不上」 | 不是 DNS 污染，是 SNI/IP 层封锁，客户端解不了 | **不用你处理**：dpull 会自动改用对应上游的内置缓存，日志出现「已从 内置源 … 缓存（上游 gcr.io）」；两条缓存都失败才走 §5 |
 | `代理不可用` | 代理本身没起 | `curl -x <代理> -I https://registry-1.docker.io/v2/` 自检；或 `--proxy direct` |
 | `docker load` 失败 | 镜像已下好，只是本机 Docker 没起 | 别重下：`docker info` 检查，或 `--no-load -o ./img.tar` 让用户手动 load |
 
@@ -118,7 +123,7 @@ DPULL=$(bash <本 skill 目录>/scripts/ensure-dpull.sh) # rc=0 时 stdout 才�
 "$DPULL" sources <镜像> --json     # 实测官方源 + 内置源 + 用户的 mirror
 ```
 
-按 `seconds` 升序挑 `ok: true` 的项；`sources` 会跨源比对 manifest digest，
+按 `seconds` 升序挑 `ok: true` 的项；每行的 `note` 会写明该源代理哪个上游（改写缓存只服务自己那个上游，拿 gcr 的源去拉 quay 不会成功）。`sources` 会跨源比对 manifest digest，
 不一致会在人类可读输出里报警。**没有 `ok: true` 的源时，不要瞎重试**，
 把结果拿给用户问：要么给一个 `--mirror` 加速地址，要么给一个 `--proxy`。
 
@@ -140,3 +145,5 @@ docker run --rm <镜像> sh -c 'echo ok'          # 能跑起来才算数（用�
 - 不要 `rm -rf ~/.cache/dpull` 或加 `--force` 来"重试"——续传是这工具的核心价值。
 - 不要为了成功而关掉校验（没有开关可以关，别去改代码）。
 - 不要把 `--mirror` 写死成某个第三方源而不告诉用户。
+- 不要提“白嫖 GitHub Actions 中转拉镜像”这种方案：实测 GitHub 文件 CDN 回程只有 ~0.5MB/s，比内置源还慢，
+  而把 runner 当代理/隧道是违反服务条款的行为。README 里已写明不做，遇到就引用那一节。

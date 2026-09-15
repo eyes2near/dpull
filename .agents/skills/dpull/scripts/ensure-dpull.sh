@@ -14,12 +14,16 @@
 # 可选参数：--install  --binary 强制下预编译包  --source 强制源码编译
 #           --repo DIR  --prefix DIR  --version vX.Y.Z 固定版本  --base URL 镜像前缀
 #           --proxy URL 下载走代理（http/https/socks5h），大陆网络直连 GitHub 常失败
+#           --min-version vX.Y.Z 本 skill 要求的最低版本（默认 1.1.0；已装副本太旧会触发升级）
 
 set -uo pipefail
 
 repo_hint="${DPULL_REPO:-}"
 prefix="${DPULL_PREFIX:-$HOME/.local/bin}"
 pin="${DPULL_VERSION:-}"                      # 例 v1.0.0；留空 = latest
+# 本 SKILL.md 描述的行为有最低版本要求：低于它的副本会让 agent 按错的假设干活
+# （v1.1.0 才有按上游分组的内置改写缓存，1.0.0 上 `pull gcr.io/...` 是必失败的）。
+min_version="${DPULL_MIN_VERSION:-1.1.0}"
 base="${DPULL_DOWNLOAD_BASE:-}"               # 镜像前缀（大陆网络常需要）
 do_install=0
 force_binary=0
@@ -33,12 +37,13 @@ while [ $# -gt 0 ]; do
     --repo) shift; repo_hint="${1:-}" ;;
     --prefix) shift; prefix="${1:-}" ;;
     --version) shift; pin="${1:-}" ;;
+    --min-version) shift; min_version="${1:-}" ;;
     --base) shift; base="${1:-}" ;;
     --proxy) shift; proxy="${1:-}" ;;
     --binary) force_binary=1 ;;
     --source) force_source=1 ;;
     -v|--verbose) verbose=1 ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "未知参数: $1" >&2; exit 64 ;;
   esac
   shift
@@ -52,6 +57,15 @@ fi
 say() { printf '%s\n' "$*" >&2; }
 path_on() { [ -n "$1" ] && [ -x "$1" ]; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# version_at_least <二进制> <a.b.c>：拿 `dpull version` 里的版本号做数值比较。
+# 取不到版本就当作不满足——宁可多装一次，也不要让一个行为不同的旧副本假装符合本 skill 的描述。
+version_at_least() {
+  local bin="$1" want="$2" got
+  got="$("$bin" version 2>/dev/null | tr -c '0-9.' ' ' | tr -s ' ' '\n' | grep -E '^[0-9]+\.[0-9]+' | head -1)"
+  [ -n "$got" ] || return 1
+  [ "$(printf '%s\n%s\n' "$got" "$want" | sort -V | head -1)" = "$want" ]
+}
 
 REPO_OWNER="eyes2near"
 REPO_NAME="dpull"
@@ -135,6 +149,19 @@ if [ -n "$found" ] && [ -n "$repo" ] && [ -n "$(find "$repo/cmd" "$repo/internal
     force_source=1
   else
     say "提示：源码比 $found 新，但本机没有 Go，继续使用现有二进制"
+  fi
+fi
+
+if [ -n "$found" ] && [ "$do_install" -eq 0 ]; then
+  if ! version_at_least "$found" "$min_version"; then
+    if [ -n "$pin" ]; then
+      # 用户钉了版本就尊重它，但要把差异说清，别让 agent 以为新行为存在
+      say "提示：按 --version $pin 钉住的副本低于 $min_version，本 skill 里写的 gcr/k8s 等上游改写缓存可能不存在"
+    else
+      say "现有副本低于本 skill 要求的 $min_version（按上游分组的内置改写缓存需要 1.1.0+），准备升级"
+      found=""
+      do_install=1
+    fi
   fi
 fi
 

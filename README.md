@@ -152,13 +152,13 @@ dpull version
 不用先找加速地址。**直接 `dpull pull nginx:1.27`，官方源连不上时会自动改用内置备用源**，并在日志里说明换了哪个、为什么：
 
 ```
-  · registry-1.docker.io 不可达，正在尝试内置备用源…
-  · 已从 内置源 1panel 取到 manifest（官方源 registry-1.docker.io 不可达：...connection reset by peer）
+  · registry.k8s.io 不可达，正在尝试内置备用源…
+  · 已从 内置源 DaoCloud 缓存（上游 registry.k8s.io） 取到 manifest（官方源 registry.k8s.io 不可达：...dial tcp 108.177.98.82:443: i/o timeout）
 平台 linux/arm64/v8，7 层，共 65.7MiB
 完成 8/8 层，共 65.7MiB，用时 5s，平均 13.1MiB/s
 ```
 
-内置清单（2026-09-13 从大陆网络实测，`dpull sources` 可随时重测）：
+上游是 Docker Hub 时（2026-09-13 实测，`dpull sources` 可随时重测）：
 
 | 源 | 地址 | 是什么 | 实测 |
 | --- | --- | --- | --- |
@@ -167,16 +167,37 @@ dpull version
 | `ecr` | `public.ecr.aws/docker/...` | **AWS 官方** Docker Hub 透传副本，路径加 `docker/` 前缀 | 15.6MiB / 6s，匿名有速率限制 |
 | `xuanyuan` | `docker.xuanyuan.me` | 公开 Docker Hub 缓存 | 15.6MiB / 16s，免费额度易限流 |
 
-`docker.1ms.run` 也能拉通但同一镜像要 3m46s，**故意没放进清单**。
+`docker.1ms.run` 拉 Docker Hub 要 3m46s，**故意没进 Docker Hub 这一组**（它在下面几个上游上反而可用）。
 
-三条设计上的硬规则，避免「自动换源」变成「自动被坑」：
+### 不止 Docker Hub：按上游分组的改写缓存
+
+以前内置清单只认 Docker Hub，于是 `dpull pull registry.k8s.io/...` 会直接死在「内置备用源也没能救回来」上，
+而一个能用的缓存就隔一个地址。现在清单**按上游分组**，每条只认领自己那一个上游、路径原样透传（2026-09-15 实测）：
+
+| 上游 | 内置源 | 入选依据 |
+| --- | --- | --- |
+| `gcr.io` | `gcr.m.daocloud.io`、`gcr.1ms.run` | 两家不同运营方的缓存对同一 tag 返回相同 digest（大陆无法与官方对账，这已是能做到的最强校验） |
+| `registry.k8s.io` | `k8s.m.daocloud.io`、`k8s.1ms.run` | 与官方 digest 逐字节一致（`pause:3.10` = `sha256:ee6521f290b2…`） |
+| `ghcr.io` | `ghcr.1ms.run`、`ghcr.m.daocloud.io` | 同上（`home-assistant:stable` = `sha256:a1bc133af84e…`） |
+| `quay.io` | `quay.1ms.run`、`quay.m.daocloud.io` | 同上（`argocd:v2.11.0` = `sha256:e81cfc1f5761…`） |
+| `mcr.microsoft.com` | `mcr.1ms.run`、`mcr.m.daocloud.io` | 同上（`dotnet/runtime:8.0` = `sha256:9cfa8aaf5c98…`） |
+| `nvcr.io` | `nvcr.m.daocloud.io` | 同上（`cuda:12.4.1-base-ubuntu22.04` = `sha256:0f6bfcbf267e…`） |
+
+改写地址必须**实测而不是猜后缀**：`registry.k8s.m.daocloud.io` 看起来完全合理但是死的，`k8s.m.daocloud.io` 才通；
+`k8s.gcr.io` 这个废弃别名也故意没映射——无法与官方对账的别名等于把缓存当成唯一权威。
+
+顺便钉死两个事实：`ghcr.io` 能通但极慢（单连接 58KB/s、8 并发 1.2MB/s）；`quay`/`mcr`/`nvcr` 本身可达，
+这几组缓存主要是限流或被封锁时的备份路径，不要指望它们比官方源快。
+
+四条设计上的硬规则，避免「自动换源」变成「自动被坑」：
 
 1. **只在网络类错误时换源**。`manifest unknown`、`401 unauthorized`、`404` 这类是 registry 的正式回答，绝不重试到别的源上——否则你打错的 tag 会被某个缓存解析成另一个构建产物。
 2. **换源后依然按该源 manifest 里的 sha256 逐层校验**，并且 `dpull sources` 会跨源比对 manifest digest，不一致会明确报警：
    ```
    内容一致性: 3 个源返回同一 manifest sha256:45e09956dc667c5 ✅
    ```
-3. **记住上次赢的源**（`<缓存目录>/sources.json`，72 小时有效），下次不再先浪费 10 秒撞死掉的官方源。
+3. **记住上次赢的源**（`<缓存目录>/sources.json`，72 小时有效，按上游分别记），下次不再先浪费 10 秒撞死掉的官方源。
+4. **一条源只能认领它能服务的那个上游**。Docker Hub 的缓存在 `gcr.io` 引用上根本不会被调用——否则它会拿自己仓库里同名的 `distroless/base` 当成你要的那个镜像。
 
 相关参数：
 
@@ -191,6 +212,29 @@ dpull version
 优先级：`--mirror` → `daemon.json` 的 mirrors → 内置备用源 → 官方源（`--prefer-builtin` 时内置源排在最前）。
 
 > 第三方缓存本质上是中间人，可信度来自内容校验而不是它的名字。要绝对确信，就拿官方渠道给出的 digest 对一次：`dpull sources` 里 `ecr` 那一行是 AWS 官方副本，用它做交叉印证最稳。
+
+## 为什么不做「白嫖 GitHub Actions 中转拉镜像」
+
+隔三差五有人提这个需求（社区现成方案：`tech-shrimp/docker_image_pusher` 2.9k★、`wukongdaily/DockerTarBuilder` 1.8k★）。
+两类玩法：Actions 拉完推到你的仓库；或者 Actions `docker save` 后把 tar 传成 artifact / Release 附件，你在国内下载。
+2026-09-15 在同一台机器上实测过回程，结论是**不做**：
+
+| 通道 | 单连接 | 8 并发 |
+| --- | --- | --- |
+| Cloudflare（带宽基线，说明不是本机网口问题） | 4.4 MB/s | — |
+| GitHub Release 附件（Azure Blob + Fastly，支持 Range） | 62 KB/s | ~0.5 MB/s |
+| `ghcr.io` blob | 58 KB/s | ~1.2 MB/s |
+| dpull 内置源（`public.ecr.aws` / `docker.1panel.live`） | 1.0–1.2 MiB/s | 更高（本来就是分片并行） |
+
+- GitHub 的文件 CDN 在国内就是瓶颈：**Actions 路线的回程不比现有内置源快**，却多付出排队延迟、Actions 配额、
+  runner 侧 Docker Hub 共享 IP 限流、workflow 模板长期维护面这几项成本。
+- 唯一能比内置源快的形态是「Actions 推到国内可达仓库」，但那要求注册 ACR 并把仓库存入 GitHub Secrets——
+  为一个不比现有路径快的方案付这个代价不划算。
+- 而这条路本来要填的洞（`gcr.io` / `registry.k8s.io` 不通）已经被上面的按上游改写缓存填掉了：
+  `dpull pull gcr.io/...` 现在零参数就能成。
+- **明确不支持**把 runner 当代理/隧道（cloudflared / bore / `ssh -R` 那一套「白嫖 Actions 搭梯子」）。
+  那不是「CI 里搬一个镜像」，而是长期占用 GitHub 基础设施做出站，属于违反服务条款、有封号先例的行为，
+  也会把这个工具变成滥用工具。真需要独立通道就用 `--mirror` 挂你自己的加速地址，或 `--proxy` 走你自己的代理。
 
 ## 用代理：`--proxy`
 
@@ -343,6 +387,7 @@ DoH 兜底解析、测速、缓存清理。
 `public.ecr.aws/docker/library/registry:2`。
 
 暂不支持（用到时请注意）：
+- 不提供 GitHub Actions 中转 / 白嫖 CI 拉镜像，也不支持把 runner 当代理（原因见上面一节）。
 - `schema1` 老 manifest；非 `layers` 类型的 rootfs；foreign/非分发层的多平台镜像。
 - `--push` 只推所选平台的 manifest（不会重建 manifest list），跨仓库 mount 只在同仓库生效。
 - 镜像源不支持 `Range` 时该层无法续传（只能整块重来）——这是协议限制，dpull 会明确提示。
