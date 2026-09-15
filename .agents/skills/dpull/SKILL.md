@@ -8,22 +8,32 @@ compatibility: macOS/Linux 单二进制，无需 Docker 即可下载与导出；
 
 不要自己拼 registry HTTP 调用，也不要反复重试 `docker pull`。**所有镜像拉取走 dpull**：它做分片并行、分片级续传、sha256 校验、官方源不可达时自动换内置源，失败时给出的 `建议:` 行是可直接执行的下一步。
 
-## 0. 先定位可执行文件
+## 0. 确认工具在位（别假设，也别自己拼命令）
+
+调本 skill 自带的脚本（路径相对本 SKILL.md 所在目录）：
 
 ```bash
-# 已安装副本优先（make install 的落点）
-DPULL=${DPULL:-$(command -v dpull || echo "$HOME/.local/bin/dpull")}
-
-# 若源码比在用的二进制更新，先重装：别拿旧副本干活（新参数会报「参数错误」）
-REPO=<仓库根>   # = 本 SKILL.md 往上三级：.agents/skills/dpull/SKILL.md
-if [ -d "$REPO" ] && [ -n "$(find "$REPO/cmd" "$REPO/internal" -name '*.go' -newer "$DPULL" 2>/dev/null | head -1)" ]; then
-  (cd "$REPO" && make install)
-fi
-[ -x "$DPULL" ] || (cd "$REPO" && make install)
-"$DPULL" version
+bash <本 skill 目录>/scripts/ensure-dpull.sh; echo "rc=$?"
 ```
 
-本机已经 `make install` 过时，上面整段可以跳过，直接用 `dpull`。
+它把可用的 dpull 绝对路径打印到 **stdout**，诊断走 **stderr**，所以：
+
+```bash
+DPULL=$(bash <本 skill 目录>/scripts/ensure-dpull.sh)   # 退出码 0 时这才是路径
+```
+
+**按退出码决定下一步，不要猜：**
+
+| rc | 含义 | 你要做的 |
+|---|---|---|
+| `0` | stdout 是可用的 dpull 绝对路径 | 之后一律用 `"$DPULL"`，别用裸名 `dpull`（可能不在 PATH） |
+| `10` | 能装但没装（本机有 git + Go） | **先向用户说明**要从 `github.com/eyes2near/dpull` 克隆并编译安装到 `~/.local/bin`，取得同意后再跑 `ensure-dpull.sh --install` |
+| `11` | 装不了：缺 Go / 连不上 GitHub / 编译失败 | 把 stderr 的原因原样汇报给用户并**停下**。不要偷偷退回 `docker pull` 硬扛 —— 那正是这个工具存在的原因 |
+
+脚本自己会找：已装的 dpull → 当前目录的源码检出 → skill 随仓库分发时的上级目录；
+发现源码比在用的二进制新会主动重装（旧副本会报「参数错误」）。
+`--repo DIR` / `--prefix DIR` 可覆盖。安装成功但目录不在 PATH 上时它只是提示一句，
+**不要**据此判断失败，用绝对路径继续即可。
 
 ## 1. 默认动作（90% 情况就这一条）
 
