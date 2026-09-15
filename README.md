@@ -34,14 +34,14 @@
 ```bash
 mkdir -p ~/.local/bin && cd ~/.local/bin
 A=dpull-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/')
-curl -fsSL -o dpull "https://github.com/eyes2near/dpull/releases/latest/download/$A"
+curl -fsSL -o "$A" "https://github.com/eyes2near/dpull/releases/latest/download/$A"
 curl -fsSL -o SHA256SUMS "https://github.com/eyes2near/dpull/releases/latest/download/SHA256SUMS"
 
-# 必须校验：过不了就别用（其他平台的条目不用管，只验手上这一个）
-grep " $A\$" SHA256SUMS | shasum -a 256 -c -    # macOS
-grep " $A\$" SHA256SUMS | sha256sum -c -       # Linux
+# 必须校验：过不了就别用。校验和里记的是产物名，所以先按产物名落文件、验完再改名。
+grep " $A\$" SHA256SUMS | shasum -a 256 -c -   # macOS
+grep " $A\$" SHA256SUMS | sha256sum -c -      # Linux
 
-chmod +x dpull && dpull version
+mv "$A" dpull && chmod +x dpull && dpull version
 ```
 
 > **别跳过 sha256。** 这类工具最怕供应链替换：透明代理、DNS 污染、镜像换包都能在你不知情时把包换掉，
