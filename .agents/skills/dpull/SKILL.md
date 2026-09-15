@@ -34,7 +34,8 @@ DPULL=$(bash <本 skill 目录>/scripts/ensure-dpull.sh) # rc=0 时 stdout 才�
 4. 都不行才克隆源码编译。
 
 网络受限时用 `--proxy URL`（脚本会把它透给 curl，socks/http 都认）；
-装到别处用 `--prefix DIR`；钉版本用 `--version v1.0.0`；镜像前缀用 `--base URL`
+装到别处用 `--prefix DIR`；钉版本用 `--version v1.1.0`；要求最低版本用 `--min-version v1.1.0`（默认 1.1.0）；
+镜像前缀用 `--base URL`
 （**镜像必须同时转发 SHA256SUMS**，脚本会拒绝拿不到校验和的镜像）。
 持久化代理可设 `DPULL_PROXY_URL`，不用每次敲。
 

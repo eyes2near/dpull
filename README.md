@@ -325,6 +325,11 @@ dpull sources
 「镜像拉不动」时知道要用 dpull、按退出码判断成败、知道怎么分诊，而不是反复重试
 `docker pull` 或自己去 curl registry API。
 
+定位/获取二进制的 `scripts/ensure-dpull.sh` 带**最低版本闸**（目前要求 ≥ 1.1.0）：副本太旧会让 agent
+按不存在的行为干活（1.0.0 上 `pull gcr.io/...` 必失败），所以下载预编译包这条路只先给出升级计划并以 rc=10
+退出，同意后再加 `--install`；取不到版本号的副本一律按“太旧”处理。（本机有源码检出 + Go 时的自动重编译
+是另一条路径，本来就是“改完就该生效”，见 SKILL.md §0。）
+
 ```bash
 # 装到全局（真实目录 + 软链文件，改仓库文档不会漂移）
 mkdir -p ~/.agents/skills/dpull

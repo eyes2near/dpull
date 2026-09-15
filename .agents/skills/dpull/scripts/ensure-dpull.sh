@@ -152,15 +152,17 @@ if [ -n "$found" ] && [ -n "$repo" ] && [ -n "$(find "$repo/cmd" "$repo/internal
   fi
 fi
 
-if [ -n "$found" ] && [ "$do_install" -eq 0 ]; then
+# 版本闸门：无论用户是否已经 --install 都要跑（带 --install 时清掉 found 就是“同意升级”）。
+if [ -n "$found" ]; then
   if ! version_at_least "$found" "$min_version"; then
     if [ -n "$pin" ]; then
       # 用户钉了版本就尊重它，但要把差异说清，别让 agent 以为新行为存在
-      say "提示：按 --version $pin 钉住的副本低于 $min_version，本 skill 里写的 gcr/k8s 等上游改写缓存可能不存在"
+      say "提示：按 --version $pin 钉住的副本低于 ${min_version}，本 skill 里写的 gcr/k8s 等上游改写缓存可能不存在"
     else
-      say "现有副本低于本 skill 要求的 $min_version（按上游分组的内置改写缓存需要 1.1.0+），准备升级"
+      say "现有副本低于本 skill 要求的 ${min_version}（按上游分组的内置改写缓存需要 1.1.0+），准备升级"
+      # 只清掉 found，**不要**动 do_install：它是 --install 的等价开关，
+      # 在这里置 1 等于绕开“先跟用户说一声”的契约，默默把用户工具箱里的东西换掉。
       found=""
-      do_install=1
     fi
   fi
 fi
@@ -190,14 +192,14 @@ case "$plan" in
     say "计划：从本机源码编译并安装到 $prefix"
     ;;
   source-clone)
-    say "计划：从 https://github.com/$REPO_OWNER/$REPO_NAME 克隆源码、编译并安装到 $prefix（需要 Go）"
+    say "计划：从 https://github.com/$REPO_OWNER/$REPO_NAME 克隆源码、编译并安装到 ${prefix}（需要 Go）"
     ;;
   binary)
     if ! asset="$(asset_name 2>/dev/null)"; then
       say "本平台 $(uname -s)/$(uname -m) 没有对应的预编译产物。"
       exit 11
     fi
-    say "计划：下载官方预编译二进制 $asset（$base/$asset），sha256 校验后安装到 $prefix/dpull（不需要 Go）"
+    say "计划：下载官方预编译二进制 ${asset}（$base/${asset}），sha256 校验后安装到 $prefix/dpull（不需要 Go）"
     ;;
   *)
     say "本机既没有可用的下载工具（curl/wget），也没有 Go，无法获取 dpull。"
@@ -246,7 +248,7 @@ install_binary() {
   say "sha256 校验通过 ${got:0:12}…"
   case "$base" in
     *github.com*) : ;;
-    *) say "注意：本次来自镜像 $base，校验和也来自同一镜像，只能证明内容自洽，不能证明未被替换。" ;;
+    *) say "注意：本次来自镜像 ${base}，校验和也来自同一镜像，只能证明内容自洽，不能证明未被替换。" ;;
   esac
   mv "$tmpdir/$asset" "$prefix/dpull" || { say "无法写入 $prefix/dpull"; return 11; }
   chmod +x "$prefix/dpull"

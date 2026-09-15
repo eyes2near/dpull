@@ -44,8 +44,12 @@ mcr.microsoft.com 给真 IP），所以 dpull 内置了多个 DoH 并允许 `--d
 ```
 
 - 内置源清单会过期，**永远以 `sources` 的实时结果为准**，不要相信记忆里的地址。
+- 内置源**按上游分组**：`docker.io` 与 `gcr.io` / `registry.k8s.io` / `ghcr.io` / `quay.io` /
+  `mcr.microsoft.com` / `nvcr.io` 各有各的改写缓存，跨上游不通用（`sources --json` 的 `note` 字段会写明）。
 - `sources` 会比对各源返回的 manifest digest。多个源给出同一 digest 才是有效印证；
   只有一个源可用时，无法交叉印证——需要明确告诉用户这个风险。
+  特例：`gcr.io` 在大陆整个域不可达，无法和官方源对账，只有两家不同运营方的缓存互相印证，
+  比“和官方对账”弱一档，汇报时要如实说明。
 - `内置:ecr` 是 `public.ecr.aws/docker/...`，AWS 官方透传副本，做交叉印证最稳，
   但匿名访问有速率限制。
 - 第三方缓存（1panel / daocloud / xuanyuan 一类）本质是中间人：内容靠 digest 保证，
