@@ -233,6 +233,7 @@ func TestSourceMemoryOrderingAndExpiry(t *testing.T) {
 func TestRepoMappingRules(t *testing.T) {
 	hub := reference.Ref{Registry: reference.DefaultRegistry, Repository: "library/nginx"}
 	other := reference.Ref{Registry: "quay.io", Repository: "prometheus/prometheus"}
+	gcr := reference.Ref{Registry: "gcr.io", Repository: "distroless/base"}
 	if repo, ok := hubMirror(hub); !ok || repo != "library/nginx" {
 		t.Errorf("hubMirror(hub) = %q %v", repo, ok)
 	}
@@ -244,6 +245,124 @@ func TestRepoMappingRules(t *testing.T) {
 	}
 	if _, ok := ecrAlias(other); ok {
 		t.Error("ecrAlias must not claim non-hub references")
+	}
+	// A rewrite cache only serves its own upstream, and passes the path through.
+	gcrOnly := hostMirror("gcr.io")
+	if repo, ok := gcrOnly(gcr); !ok || repo != "distroless/base" {
+		t.Errorf("hostMirror(gcr.io)(gcr) = %q %v", repo, ok)
+	}
+	for _, r := range []reference.Ref{hub, other} {
+		if _, ok := gcrOnly(r); ok {
+			t.Errorf("hostMirror(gcr.io) claimed %s", r.Host())
+		}
+	}
+	// k8s.gcr.io is deliberately *not* an alias here: an alias we cannot verify
+	// against the origin would turn the cache into the only authority on the tag.
+	if _, ok := gcrOnly(reference.Ref{Registry: "k8s.gcr.io", Repository: "pause"}); ok {
+		t.Error("unverified upstream aliases must not be mapped")
+	}
+}
+
+// TestFallbackTableCoversUpstreamsWithoutCrossTalking is the regression test for
+// "the built-in table only knew Docker Hub": every rewrite entry must serve the
+// upstream it advertises, must refuse every other upstream in the table, and
+// must be labelled well enough for a log line to say who served what.
+func TestFallbackTableCoversUpstreamsWithoutCrossTalking(t *testing.T) {
+	hosts := map[string]bool{}
+	for _, s := range fallbackSources {
+		if s.Upstream != "" {
+			hosts[s.Upstream] = true
+		}
+	}
+	if len(hosts) < 4 {
+		t.Errorf("rewrite caches only cover %d upstreams; Docker Hub must not be the only covered registry", len(hosts))
+	}
+	for _, s := range fallbackSources {
+		if s.Name == "" || s.Base == "" || s.Repo == nil || s.Note == "" {
+			t.Fatalf("incomplete source entry: %+v", s)
+		}
+		if s.Provider == "" {
+			t.Fatalf("source %q has no Provider, so log lines will be unhelpful", s.Name)
+		}
+		if s.Upstream == "" {
+			continue // hub table: covered by hubMirror/ecrAlias above
+		}
+		if !strings.HasPrefix(s.Base, "https://") {
+			t.Errorf("source %q is not https: %s", s.Name, s.Base)
+		}
+		label := s.Label()
+		if !strings.Contains(label, s.Upstream) || !strings.Contains(label, s.Provider) {
+			t.Errorf("Label(%q) = %q: must name both provider and upstream", s.Name, label)
+		}
+		for host := range hosts {
+			r := reference.Ref{Registry: host, Repository: "someone/thing"}
+			repo, ok := s.Repo(r)
+			want := host == s.Upstream
+			if ok != want {
+				t.Errorf("source %q claims %s = %v, want %v", s.Name, host, ok, want)
+			}
+			if ok && repo != r.Repository {
+				t.Errorf("source %q rewrote %s to %q: a rewrite cache must pass the path through", s.Name, r.Repository, repo)
+			}
+		}
+		// The Docker Hub table must stay out of the way of rewrite caches, and
+		// vice versa: a hub source answering for gcr.io would fetch a different
+		// repository than the one the user asked for.
+		if s.Upstream != "" {
+			if _, ok := s.Repo(reference.Ref{Registry: reference.DefaultRegistry, Repository: "library/nginx"}); ok {
+				t.Errorf("source %q claims Docker Hub", s.Name)
+			}
+		}
+	}
+}
+
+// TestFallbackOnlySourcesThatCanServeTheUpstream proves the wiring that matters:
+// when the origin is unreachable, a source that cannot serve that upstream must
+// not even be contacted, and the one that can must be the one that rescues it.
+// Everything stays on loopback so the test never needs a network.
+func TestFallbackOnlySourcesThatCanServeTheUpstream(t *testing.T) {
+	hubOnly := newStubSource(t, false)
+	upstreamSrc := newStubSource(t, false)
+	restore := fallbackSources
+	fallbackSources = []fallbackSource{
+		{Name: "hub", Base: hubOnly.URL(), Repo: hubMirror, Provider: "hubstub"},
+		{Name: "k8s", Base: upstreamSrc.URL(), Repo: hostMirror("127.0.0.1:1"), Provider: "k8sstub", Upstream: "127.0.0.1:1"},
+	}
+	defer func() { fallbackSources = restore }()
+
+	o := &Options{CacheDir: filepath.Join(t.TempDir(), "cache"), Concurrency: 2, ChunkSize: 1 << 20, Retries: 0, Stall: 2 * time.Second, Quiet: true, Insecure: true}
+	ref := unreachableRef(t) // 127.0.0.1:1 — nothing listens there
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, _, err := resolveWithSources(ctx, o, ref, "v1", "", false); err != nil {
+		t.Fatalf("the source that serves this upstream should have rescued the pull: %v", err)
+	}
+	if hubOnly.hits != 0 {
+		t.Errorf("a Docker-Hub-only cache was contacted for another upstream (%d hits)", hubOnly.hits)
+	}
+	if upstreamSrc.hits == 0 {
+		t.Error("the source that serves this upstream was not contacted")
+	}
+	// The winner is remembered per upstream host, so the next run starts there.
+	b, err := os.ReadFile(sourceMemoryPath(o.CacheDir))
+	if err != nil {
+		t.Fatalf("no source memory written: %v", err)
+	}
+	if !strings.Contains(string(b), `"k8s"`) || !strings.Contains(string(b), "127.0.0.1:1") {
+		t.Errorf("source memory = %s", b)
+	}
+}
+
+func TestSourceLabelNamesTheUpstream(t *testing.T) {
+	restore := fallbackSources
+	defer func() { fallbackSources = restore }()
+	fallbackSources = []fallbackSource{upstreamSource("x-gcr", "https://x.invalid", "Acme", "gcr.io")}
+	got := sourceLabel("内置:x-gcr")
+	if !strings.Contains(got, "gcr.io") || !strings.Contains(got, "Acme") {
+		t.Errorf("sourceLabel = %q", got)
+	}
+	if got := sourceLabel("内置:unknown-name"); !strings.Contains(got, "unknown-name") {
+		t.Errorf("unknown sources must still be named: %q", got)
 	}
 }
 

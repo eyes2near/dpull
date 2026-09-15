@@ -9,6 +9,11 @@ package app
 // of sources, tries them when the user's own endpoints all failed with a
 // *network* error, and remembers which one worked.
 //
+// The table is keyed by upstream registry: a source only gets tried for the
+// references it can actually serve. Docker Hub used to be the only covered
+// upstream, which silently left gcr.io / registry.k8s.io / ghcr.io with no
+// fallback at all.
+//
 // Two safety rules:
 //
 //   - A fallback is only tried for network-class failures. "manifest unknown",
@@ -46,7 +51,35 @@ type fallbackSource struct {
 	// Repo maps the requested repository onto the path this source serves.
 	// It reports false when the source cannot possibly serve the reference.
 	Repo func(r reference.Ref) (string, bool)
-	Note string
+	// Provider and Upstream are display metadata: which operator runs the cache
+	// and which registry it proxies. Upstream is empty for the Docker Hub table,
+	// whose sources are described by Note instead.
+	Provider string
+	Upstream string
+	Note     string
+}
+
+// Label names this source in a log line. Naming the upstream matters: "已从
+// daocloud 取到 manifest" does not tell you that a *gcr.io* cache served a
+// k8s reference, which is exactly the thing worth seeing.
+func (s fallbackSource) Label() string {
+	if s.Upstream != "" {
+		return fmt.Sprintf("%s 缓存（上游 %s）", s.Provider, s.Upstream)
+	}
+	if s.Name == "ecr" {
+		return "AWS ECR 官方透传副本"
+	}
+	return s.Name
+}
+
+// byName finds a source by its short name (as stored in source memory).
+func byName(name string) (fallbackSource, bool) {
+	for _, s := range fallbackSources {
+		if s.Name == name {
+			return s, true
+		}
+	}
+	return fallbackSource{}, false
 }
 
 // hubMirror serves Docker Hub repositories under their original path.
@@ -67,17 +100,112 @@ func ecrAlias(r reference.Ref) (string, bool) {
 	return "docker/" + r.Repository, true
 }
 
+// hostMirror serves one specific upstream registry with the repository path
+// passed through unchanged. Rewrite caches such as gcr.m.daocloud.io are
+// pull-through proxies of a *single* origin: only the host differs. Keying on
+// the upstream host is what stops one entry from claiming every reference in
+// the table and quietly pulling a same-named repository from somewhere else.
+func hostMirror(upstreams ...string) func(reference.Ref) (string, bool) {
+	return func(r reference.Ref) (string, bool) {
+		h := r.Host()
+		for _, u := range upstreams {
+			if strings.EqualFold(h, u) {
+				return r.Repository, true
+			}
+		}
+		return "", false
+	}
+}
+
+// upstreamNote builds the human note for a rewrite cache.
+func upstreamNote(provider, upstream string) string {
+	return provider + " 公开加速（上游 " + upstream + "，路径原样）"
+}
+
 // fallbackSources is ordered by measured throughput from a mainland-China
 // network on 2026-09-13 (redis:7.2-alpine, 15.6MiB, 16 connections):
 // 1panel 5s, daocloud 5s, ecr 6s, xuanyuan 16s. docker.1ms.run served the same
 // image in 3m46s and is deliberately left out. Public caches come and go, so
 // `dpull sources` re-measures them and the run itself always falls through to
 // the next candidate on failure.
+//
+// The first four entries only proxy Docker Hub (see hubMirror/ecrAlias), which
+// used to mean every other registry had no fallback at all: `dpull pull
+// registry.k8s.io/...` would fail with "内置备用源也没能救回来" while a working
+// cache sat two keystrokes away. The rewrite caches below cover the upstreams
+// that actually get blocked. Each entry was accepted only after it returned the
+// *same manifest digest* as the official registry for the same tag:
+//
+//	registry.k8s.io/pause:3.10          sha256:ee6521f290b2  官方 = k8s.m.daocloud.io = k8s.1ms.run
+//	quay.io/argoproj/argocd:v2.11.0     sha256:e81cfc1f5761  官方 = quay.m.daocloud.io = quay.1ms.run
+//	mcr.microsoft.com/dotnet/runtime:8.0 sha256:9cfa8aaf5c98 官方 = mcr.m.daocloud.io = mcr.1ms.run
+//	ghcr.io/home-assistant/...:stable   sha256:a1bc133af84e  官方 = ghcr.m.daocloud.io = ghcr.1ms.run
+//	nvcr.io/nvidia/cuda:12.4.1-base-...  sha256:0f6bfcbf267e  官方 = nvcr.m.daocloud.io
+//	gcr.io/distroless/base:latest       sha256:0ebad3510af5  gcr.m.daocloud.io = gcr.1ms.run
+//
+// gcr.io is the one row that cannot be compared against the origin from a
+// mainland network (it is simply unreachable here), so it stands on two caches
+// run by different operators agreeing on the digest — weaker than a comparison
+// with the origin, and `dpull sources` says as much by printing every digest it
+// saw. Never trust a cache silently: layer bytes are always checked against the
+// digest in the manifest the cache itself served.
+//
+// Rewrite hosts must be probed, not guessed: registry.k8s.m.daocloud.io looks
+// like the obvious pattern and is dead, while k8s.m.daocloud.io works.
+//
+// Order inside one upstream is the first-try preference, measured 2026-09-15
+// with `dpull sources` from the same mainland network (延迟 / 首块速度):
+//
+//	gcr:  daocloud 5.8s 76KiB/s  >  1ms 9.5s 31KiB/s      ← gcr 上 daocloud 明显快
+//	mcr:  daocloud 13.1s         >  1ms 13.2s（两条都慢，好在 mcr 官方本身可达）
+//	k8s:  daocloud 3.9s 128KiB/s vs 1ms 5.8s 86KiB/s，重跑一次互换（1ms 4.7s/123 对 daocloud 5.4s/95）
+//	quay: 1ms 13.2s 78KiB/s      >  daocloud 12.7s 47KiB/s
+//	ghcr: 1ms 3.0s               >  daocloud 4.2s（两条都只有个位数 B/s，基本是看谁先响应）
+//
+// Read that as: only the gcr gap is bigger than the noise, the rest of the pairs
+// swap places between runs. These are public caches that churn, so the order
+// decides what gets tried first and nothing more — `dpull sources` re-measures,
+// and a failing run falls through to the next candidate.
+
+// upstreamSource builds a rewrite-cache entry with its display metadata wired
+// up, so the provider and upstream are only typed once per row.
+func upstreamSource(name, base, provider, upstream string) fallbackSource {
+	return fallbackSource{
+		Name:     name,
+		Base:     base,
+		Repo:     hostMirror(upstream),
+		Provider: provider,
+		Upstream: upstream,
+		Note:     upstreamNote(provider, upstream),
+	}
+}
+
 var fallbackSources = []fallbackSource{
-	{Name: "1panel", Base: "https://docker.1panel.live", Repo: hubMirror, Note: "公开 Docker Hub 缓存"},
-	{Name: "daocloud", Base: "https://docker.m.daocloud.io", Repo: hubMirror, Note: "DaoCloud 公开加速"},
-	{Name: "ecr", Base: "https://public.ecr.aws", Repo: ecrAlias, Note: "AWS 官方 Docker Hub 透传副本"},
-	{Name: "xuanyuan", Base: "https://docker.xuanyuan.me", Repo: hubMirror, Note: "公开 Docker Hub 缓存"},
+	// Docker Hub
+	{Name: "1panel", Base: "https://docker.1panel.live", Repo: hubMirror, Provider: "1panel", Note: "公开 Docker Hub 缓存"},
+	{Name: "daocloud", Base: "https://docker.m.daocloud.io", Repo: hubMirror, Provider: "DaoCloud", Note: "DaoCloud 公开加速"},
+	{Name: "ecr", Base: "https://public.ecr.aws", Repo: ecrAlias, Provider: "AWS", Note: "AWS 官方 Docker Hub 透传副本"},
+	{Name: "xuanyuan", Base: "https://docker.xuanyuan.me", Repo: hubMirror, Provider: "xuanyuan", Note: "公开 Docker Hub 缓存"},
+
+	// gcr.io — 大陆最常见的第二个死点（Google 系整体不通）
+	upstreamSource("daocloud-gcr", "https://gcr.m.daocloud.io", "DaoCloud", "gcr.io"),
+	upstreamSource("1ms-gcr", "https://gcr.1ms.run", "1ms", "gcr.io"),
+
+	// registry.k8s.io — 官方端点本身就时通时断，不是单纯的大陆问题。
+	// 两条的快慢会在重跑时互换，挑 daocloud 只是因为它缓存命中更常见。
+	upstreamSource("daocloud-k8s", "https://k8s.m.daocloud.io", "DaoCloud", "registry.k8s.io"),
+	upstreamSource("1ms-k8s", "https://k8s.1ms.run", "1ms", "registry.k8s.io"),
+
+	// ghcr.io — 通但极慢（实测单连接 58KB/s、8 并发 1.2MB/s），缓存不一定更快
+	upstreamSource("1ms-ghcr", "https://ghcr.1ms.run", "1ms", "ghcr.io"),
+	upstreamSource("daocloud-ghcr", "https://ghcr.m.daocloud.io", "DaoCloud", "ghcr.io"),
+
+	// quay.io / mcr.microsoft.com / nvcr.io — 本身可达，作为限流或被墙时的备份路径
+	upstreamSource("1ms-quay", "https://quay.1ms.run", "1ms", "quay.io"),
+	upstreamSource("daocloud-quay", "https://quay.m.daocloud.io", "DaoCloud", "quay.io"),
+	upstreamSource("daocloud-mcr", "https://mcr.m.daocloud.io", "DaoCloud", "mcr.microsoft.com"),
+	upstreamSource("1ms-mcr", "https://mcr.1ms.run", "1ms", "mcr.microsoft.com"),
+	upstreamSource("daocloud-nvcr", "https://nvcr.m.daocloud.io", "DaoCloud", "nvcr.io"),
 }
 
 // sourceMemoryFile is how long a remembered winner stays preferred. Public
@@ -265,13 +393,11 @@ func resolveWithSources(ctx context.Context, o *Options, ref reference.Ref, spec
 }
 
 func sourceLabel(name string) string {
-	name = strings.TrimPrefix(name, "内置:")
-	switch name {
-	case "ecr":
-		return "内置源 AWS ECR 官方透传副本"
-	default:
-		return "内置源 " + name
+	short := strings.TrimPrefix(name, "内置:")
+	if s, ok := byName(short); ok {
+		return "内置源 " + s.Label()
 	}
+	return "内置源 " + short
 }
 
 // trimErr shortens an error for one-line display.
@@ -291,6 +417,7 @@ func trimErr(err error) string {
 type sourceRow struct {
 	Name    string  `json:"name"`
 	Base    string  `json:"base"`
+	Note    string  `json:"note,omitempty"`
 	OK      bool    `json:"ok"`
 	Seconds float64 `json:"seconds"`
 	Speed   float64 `json:"speed_bps,omitempty"`
@@ -321,7 +448,16 @@ func Sources(ctx context.Context, o *Options, images []string) (int, error) {
 
 	var rows []sourceRow
 	digests := map[string][]string{}
-	try := func(name, base, repo string) {
+	try := func(name, base, repo, note string) {
+		// Whatever path this probe takes, stamp its note on the row it produces:
+		// "内置:daocloud-gcr" alone does not say which upstream it proxies, and
+		// the JSON is what agents and scripts read.
+		before := len(rows)
+		defer func() {
+			for i := before; i < len(rows); i++ {
+				rows[i].Note = note
+			}
+		}()
 		ep, err := parseEndpoint(name, base, o.Insecure, plainHTTPHosts(o))
 		if err != nil {
 			rows = append(rows, sourceRow{Name: name, Base: base, Err: err.Error()})
@@ -366,19 +502,19 @@ func Sources(ctx context.Context, o *Options, images []string) (int, error) {
 		})
 	}
 
-	try("origin:"+ref.Host(), ref.Host(), ref.Repository)
+	try("origin:"+ref.Host(), ref.Host(), ref.Repository, "")
 	for i, m := range o.Mirrors {
-		try(fmt.Sprintf("mirror%d", i+1), m, ref.Repository)
+		try(fmt.Sprintf("mirror%d", i+1), m, ref.Repository, "")
 	}
 	for _, s := range dockerDaemonMirrors() {
-		try("daemon-mirror", s, ref.Repository)
+		try("daemon-mirror", s, ref.Repository, "")
 	}
 	for _, s := range fallbackSources {
 		repo, ok := s.Repo(ref)
 		if !ok {
 			continue
 		}
-		try("内置:"+s.Name, s.Base, repo)
+		try("内置:"+s.Name, s.Base, repo, s.Note)
 	}
 
 	if o.JSON {
