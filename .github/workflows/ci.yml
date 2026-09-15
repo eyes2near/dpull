@@ -88,6 +88,14 @@ jobs:
       - name: build 4 platforms
         run: make dist VERSION="${GITHUB_REF_NAME:-ci-draft}"
 
+      - name: 生成校验和
+        run: |
+          cd dist
+          (sha256sum dpull-* || shasum -a 256 dpull-*) > SHA256SUMS
+          cat SHA256SUMS
+
+      # 校验和必须和二进制一起发：客户端（skill 的 ensure-dpull.sh）下载后要能验真，
+      # 否则代理/镜像换包没人发现。
       - name: upload to release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -102,4 +110,4 @@ jobs:
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" $extra --generate-notes --title "$tag"
           fi
-          gh release upload "$tag" dist/dpull-* --clobber
+          gh release upload "$tag" dist/dpull-* dist/SHA256SUMS --clobber
