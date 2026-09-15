@@ -8,18 +8,13 @@ compatibility: macOS/Linux 单二进制，无需 Docker 即可下载与导出；
 
 不要自己拼 registry HTTP 调用，也不要反复重试 `docker pull`。**所有镜像拉取走 dpull**：它做分片并行、分片级续传、sha256 校验、官方源不可达时自动换内置源，失败时给出的 `建议:` 行是可直接执行的下一步。
 
-## 0. 确认工具在位（别假设，也别自己拼命令）
+## 0. 确认工具在位（别假设，也别自己拼下载命令）
 
 调本 skill 自带的脚本（路径相对本 SKILL.md 所在目录）：
 
 ```bash
-bash <本 skill 目录>/scripts/ensure-dpull.sh; echo "rc=$?"
-```
-
-它把可用的 dpull 绝对路径打印到 **stdout**，诊断走 **stderr**，所以：
-
-```bash
-DPULL=$(bash <本 skill 目录>/scripts/ensure-dpull.sh)   # 退出码 0 时这才是路径
+bash <本 skill 目录>/scripts/ensure-dpull.sh          # 只探测，不安装
+DPULL=$(bash <本 skill 目录>/scripts/ensure-dpull.sh) # rc=0 时 stdout 才是路径
 ```
 
 **按退出码决定下一步，不要猜：**
@@ -27,15 +22,26 @@ DPULL=$(bash <本 skill 目录>/scripts/ensure-dpull.sh)   # 退出码 0 时这�
 | rc | 含义 | 你要做的 |
 |---|---|---|
 | `0` | stdout 是可用的 dpull 绝对路径 | 之后一律用 `"$DPULL"`，别用裸名 `dpull`（可能不在 PATH） |
-| `10` | 能装但没装（本机有 git + Go） | **先向用户说明**要从 `github.com/eyes2near/dpull` 克隆并编译安装到 `~/.local/bin`，取得同意后再跑 `ensure-dpull.sh --install` |
-| `11` | 装不了：缺 Go / 连不上 GitHub / 编译失败 | 把 stderr 的原因原样汇报给用户并**停下**。不要偷偷退回 `docker pull` 硬扛 —— 那正是这个工具存在的原因 |
+| `10` | 能装但没装 | **先向用户说明**脚本打出的计划（从哪取、装到哪），取得同意后再加 `--install` 重跑 |
+| `11` | 获取失败（下载不通 / **sha256 校验不过** / 平台没有对应包） | 把 stderr 原样汇报给用户并**停下**。绝不静默退回 `docker pull` 硬扛，也绝不绕过校验强行装 |
 
-脚本自己会找：已装的 dpull → 当前目录的源码检出 → skill 随仓库分发时的上级目录；
-发现源码比在用的二进制新会主动重装（旧副本会报「参数错误」）。
-`--repo DIR` / `--prefix DIR` 可覆盖。安装成功但目录不在 PATH 上时它只是提示一句，
-**不要**据此判断失败，用绝对路径继续即可。
+脚本的获取阶梯，以及为什么这么排：
 
-## 1. 默认动作（90% 情况就这一条）
+1. 本机已装 → 直接用；**源码比二进制新且有 Go → 自动重编译**（旧副本会报「参数错误」）。
+2. 在 dpull 源码检出里且有 Go → 源码编译（开发者场景，改完就该生效）。
+3. 否则**下载官方 Release 预编译二进制**，`SHA256SUMS` 逐一对账后才落地 —— **不需要 Go**。
+   本机有 `gh` 时优先走 gh（它走 api.github.com，比 github.com 稳）。
+4. 都不行才克隆源码编译。
+
+网络受限时用 `--proxy URL`（脚本会把它透给 curl，socks/http 都认）；
+装到别处用 `--prefix DIR`；钉版本用 `--version v1.0.0`；镜像前缀用 `--base URL`
+（**镜像必须同时转发 SHA256SUMS**，脚本会拒绝拿不到校验和的镜像）。
+持久化代理可设 `DPULL_PROXY_URL`，不用每次敲。
+
+装完不在 PATH 上只是提示一句，**不要**据此判断失败，用绝对路径继续。
+`sha256 校验不通过` 是**安全事件**，不是网络故障：立刻告诉用户，别再换源重试。
+
+## 1. 默认动作（90% 情况就这一条）## 1. 默认动作（90% 情况就这一条）
 
 ```bash
 "$DPULL" pull <镜像> --json

@@ -26,13 +26,40 @@
 
 ## 安装
 
+### 方式一：直接下载预编译二进制（不需要 Go）
+
+[Releases](https://github.com/eyes2near/dpull/releases) 每个版本都带 4 个平台的静态二进制 + `SHA256SUMS`：
+`dpull-darwin-arm64` / `dpull-darwin-amd64` / `dpull-linux-amd64` / `dpull-linux-arm64`。
+
+```bash
+mkdir -p ~/.local/bin && cd ~/.local/bin
+A=dpull-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/')
+curl -fsSL -o dpull "https://github.com/eyes2near/dpull/releases/latest/download/$A"
+curl -fsSL -o SHA256SUMS "https://github.com/eyes2near/dpull/releases/latest/download/SHA256SUMS"
+
+# 必须校验：过不了就别用（其他平台的条目不用管，只验手上这一个）
+grep " $A\$" SHA256SUMS | shasum -a 256 -c -    # macOS
+grep " $A\$" SHA256SUMS | sha256sum -c -       # Linux
+
+chmod +x dpull && dpull version
+```
+
+> **别跳过 sha256。** 这类工具最怕供应链替换：透明代理、DNS 污染、镜像换包都能在你不知情时把包换掉，
+> 而它拿到的是你机器的 registry 凭据。
+>
+> GitHub 直连受限时加 `-x socks5h://127.0.0.1:1080`（`socks4://` 也行；但 socks4 用**本机** DNS，
+> DNS 被污染时要用 `socks4a://` 让代理去解析）。本机装了 `gh` 的话更省事：
+> `gh release download latest -R eyes2near/dpull -p 'dpull-*' -p SHA256SUMS`。
+
+### 方式二：源码编译
+
 ```bash
 make install                   # → ~/.local/bin/dpull 并在任意 shell 可用（免 sudo）
 make build                     # → 只编译到 bin/dpull，不安装
 make dist                      # 交叉编译 mac/linux × arm64/amd64 到 dist/
 ```
 
-只依赖 Go 工具链和标准库，无第三方依赖；产物是单个静态二进制。
+只依赖 Go 工具链（go.mod 声明 1.22 为下限）和标准库，无第三方依赖；产物是单个静态二进制。
 
 ## 快速开始
 
